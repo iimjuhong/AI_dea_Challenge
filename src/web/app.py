@@ -37,6 +37,16 @@ def _annotate_frame(frame, detections):
     return frame
 
 
+def _overlay_fps(frame, fps):
+    """프레임 좌상단에 FPS 오버레이"""
+    text = f"FPS: {fps:.1f}"
+    cv2.putText(frame, text, (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
+    cv2.putText(frame, text, (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    return frame
+
+
 def generate_frames():
     """MJPEG 스트리밍용 프레임 제너레이터"""
     while True:
@@ -51,6 +61,7 @@ def generate_frames():
         if detector is not None and detector.is_ready:
             detections = detector.detect(frame)
             frame = _annotate_frame(frame, detections)
+            frame = _overlay_fps(frame, detector.get_fps())
 
         ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ret:
@@ -75,6 +86,22 @@ def video_feed():
         generate_frames(),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
+
+
+@app.route('/api/stats')
+def api_stats():
+    """실시간 통계 API: FPS, 검출된 사람 수"""
+    if detector is not None and detector.is_ready:
+        return jsonify({
+            'fps': detector.get_fps(),
+            'person_count': detector.get_detection_count(),
+            'detector_active': True,
+        })
+    return jsonify({
+        'fps': 0,
+        'person_count': 0,
+        'detector_active': False,
+    })
 
 
 @app.route('/health')

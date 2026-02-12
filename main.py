@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import signal
 import sys
 
@@ -30,7 +31,7 @@ def parse_args():
     parser.add_argument('--sensor-id', type=int, default=0, help='CSI 센서 ID')
     parser.add_argument('--flip', type=int, default=0,
                         help='영상 회전 (0=없음, 2=180도)')
-    parser.add_argument('--model', type=str, default=None,
+    parser.add_argument('--model', type=str, default='models/yolov8n.onnx',
                         help='YOLOv8 ONNX 모델 경로')
     parser.add_argument('--conf-threshold', type=float, default=0.5,
                         help='검출 신뢰도 임계값')
@@ -52,9 +53,9 @@ def main():
         flip_method=args.flip,
     )
 
-    # 검출기 초기화 (모델 경로가 지정된 경우)
+    # 검출기 초기화 (모델 파일이 존재하는 경우)
     detector = None
-    if args.model:
+    if args.model and os.path.exists(args.model):
         detector = YOLOv8Detector(
             model_path=args.model,
             conf_threshold=args.conf_threshold,

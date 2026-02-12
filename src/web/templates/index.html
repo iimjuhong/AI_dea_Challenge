@@ -32,8 +32,29 @@
             max-width: 100%;
             border-radius: 4px;
         }
-        .status {
+        .stats-bar {
+            display: flex;
+            gap: 24px;
             margin-top: 12px;
+            font-size: 0.95rem;
+        }
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .stat-label {
+            color: #8899aa;
+        }
+        .stat-value {
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            min-width: 2.5em;
+        }
+        .stat-value.fps { color: #00e5ff; }
+        .stat-value.count { color: #76ff03; }
+        .status {
+            margin-top: 8px;
             font-size: 0.85rem;
             color: #8899aa;
         }
@@ -46,6 +67,10 @@
             margin-right: 6px;
             animation: blink 2s infinite;
         }
+        .status .dot.inactive {
+            background: #ff5252;
+            animation: none;
+        }
         @keyframes blink {
             50% { opacity: 0.4; }
         }
@@ -56,6 +81,50 @@
     <div class="stream-container">
         <img src="{{ url_for('video_feed') }}" alt="Live Stream">
     </div>
-    <p class="status"><span class="dot"></span>실시간 스트리밍 중</p>
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span class="stat-label">FPS:</span>
+            <span class="stat-value fps" id="fps-value">-</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-label">검출 인원:</span>
+            <span class="stat-value count" id="count-value">-</span>
+        </div>
+    </div>
+    <p class="status">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">연결 중...</span>
+    </p>
+
+    <script>
+        const fpsEl = document.getElementById('fps-value');
+        const countEl = document.getElementById('count-value');
+        const dotEl = document.getElementById('status-dot');
+        const statusEl = document.getElementById('status-text');
+
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                fpsEl.textContent = data.fps.toFixed(1);
+                countEl.textContent = data.person_count;
+                if (data.detector_active) {
+                    dotEl.className = 'dot';
+                    statusEl.textContent = '검출기 활성 · 실시간 스트리밍 중';
+                } else {
+                    dotEl.className = 'dot inactive';
+                    statusEl.textContent = '검출기 비활성 · 스트리밍만 동작 중';
+                }
+            } catch {
+                dotEl.className = 'dot inactive';
+                statusEl.textContent = '서버 연결 실패';
+                fpsEl.textContent = '-';
+                countEl.textContent = '-';
+            }
+        }
+
+        fetchStats();
+        setInterval(fetchStats, 1000);
+    </script>
 </body>
 </html>
