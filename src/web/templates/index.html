@@ -1,11 +1,17 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>실시간 카메라</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, sans-serif;
             background: #1a1a2e;
@@ -13,12 +19,14 @@
             min-height: 100vh;
             padding: 20px;
         }
+
         h1 {
             text-align: center;
             margin-bottom: 16px;
             font-size: 1.4rem;
             font-weight: 500;
         }
+
         .main-layout {
             display: flex;
             gap: 20px;
@@ -26,23 +34,27 @@
             margin: 0 auto;
             align-items: flex-start;
         }
+
         .left-panel {
             flex: 1;
             min-width: 0;
         }
+
         .stream-container {
             background: #16213e;
             border-radius: 8px;
             padding: 8px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
             position: relative;
             display: inline-block;
         }
+
         .stream-container img {
             display: block;
             max-width: 100%;
             border-radius: 4px;
         }
+
         #roi-canvas {
             position: absolute;
             top: 8px;
@@ -51,46 +63,68 @@
             cursor: crosshair;
             pointer-events: none;
         }
+
         #roi-canvas.drawing {
             pointer-events: auto;
         }
+
         .stats-bar {
             display: flex;
             gap: 24px;
             margin-top: 12px;
             font-size: 0.95rem;
         }
+
         .stat-item {
             display: flex;
             align-items: center;
             gap: 6px;
         }
-        .stat-label { color: #8899aa; }
+
+        .stat-label {
+            color: #8899aa;
+        }
+
         .stat-value {
             font-weight: 600;
             font-variant-numeric: tabular-nums;
             min-width: 2.5em;
         }
-        .stat-value.fps { color: #00e5ff; }
-        .stat-value.count { color: #76ff03; }
+
+        .stat-value.fps {
+            color: #00e5ff;
+        }
+
+        .stat-value.count {
+            color: #76ff03;
+        }
+
         .status {
             margin-top: 8px;
             font-size: 0.85rem;
             color: #8899aa;
         }
+
         .status .dot {
             display: inline-block;
-            width: 8px; height: 8px;
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
             background: #00c853;
             margin-right: 6px;
             animation: blink 2s infinite;
         }
+
         .status .dot.inactive {
             background: #ff5252;
             animation: none;
         }
-        @keyframes blink { 50% { opacity: 0.4; } }
+
+        @keyframes blink {
+            50% {
+                opacity: 0.4;
+            }
+        }
 
         /* ROI Panel */
         .roi-panel {
@@ -99,20 +133,23 @@
             background: #16213e;
             border-radius: 8px;
             padding: 16px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
         }
+
         .roi-panel h2 {
             font-size: 1.1rem;
             font-weight: 500;
             margin-bottom: 12px;
             color: #ccc;
         }
+
         .roi-form {
             display: flex;
             flex-direction: column;
             gap: 8px;
             margin-bottom: 16px;
         }
+
         .roi-form input[type="text"] {
             background: #0f3460;
             border: 1px solid #333;
@@ -122,13 +159,16 @@
             font-size: 0.9rem;
             outline: none;
         }
+
         .roi-form input[type="text"]:focus {
             border-color: #00e5ff;
         }
+
         .roi-form .btn-row {
             display: flex;
             gap: 6px;
         }
+
         .btn {
             padding: 7px 14px;
             border: none;
@@ -138,25 +178,51 @@
             font-weight: 500;
             transition: opacity 0.15s;
         }
-        .btn:hover { opacity: 0.85; }
-        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-        .btn-primary { background: #00e5ff; color: #111; }
-        .btn-cancel { background: #555; color: #eee; }
-        .btn-danger { background: #ff5252; color: #fff; }
+
+        .btn:hover {
+            opacity: 0.85;
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: #00e5ff;
+            color: #111;
+        }
+
+        .btn-cancel {
+            background: #555;
+            color: #eee;
+        }
+
+        .btn-danger {
+            background: #ff5252;
+            color: #fff;
+        }
+
         .btn-sm {
             padding: 4px 10px;
             font-size: 0.8rem;
         }
+
         .drawing-hint {
             font-size: 0.8rem;
             color: #ffab00;
             margin-top: 4px;
             display: none;
         }
-        .drawing-hint.visible { display: block; }
+
+        .drawing-hint.visible {
+            display: block;
+        }
+
         .roi-list {
             list-style: none;
         }
+
         .roi-list-item {
             display: flex;
             align-items: center;
@@ -164,24 +230,32 @@
             padding: 8px 0;
             border-bottom: 1px solid #222;
         }
-        .roi-list-item:last-child { border-bottom: none; }
+
+        .roi-list-item:last-child {
+            border-bottom: none;
+        }
+
         .roi-info {
             display: flex;
             align-items: center;
             gap: 8px;
             min-width: 0;
         }
+
         .roi-color-dot {
-            width: 12px; height: 12px;
+            width: 12px;
+            height: 12px;
             border-radius: 50%;
             flex-shrink: 0;
         }
+
         .roi-name {
             font-size: 0.9rem;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
+
         .roi-count-badge {
             background: #0f3460;
             color: #76ff03;
@@ -192,6 +266,7 @@
             margin-left: 4px;
             flex-shrink: 0;
         }
+
         .roi-empty {
             color: #666;
             font-size: 0.85rem;
@@ -200,6 +275,7 @@
         }
     </style>
 </head>
+
 <body>
     <h1>식당 대기시간 추정 시스템 - 실시간 카메라</h1>
     <div class="main-layout">
@@ -232,7 +308,7 @@
                     <button class="btn btn-primary" id="btn-draw" onclick="startDrawing()">그리기 시작</button>
                     <button class="btn btn-cancel" id="btn-cancel" onclick="cancelDrawing()" disabled>취소</button>
                 </div>
-                <p class="drawing-hint" id="drawing-hint">클릭: 꼭짓점 추가 / 더블클릭: 완성</p>
+                <p class="drawing-hint" id="drawing-hint">좌클릭: 꼭짓점 추가 / 우클릭: 완성</p>
             </div>
             <h2>ROI 목록</h2>
             <ul class="roi-list" id="roi-list">
@@ -242,186 +318,175 @@
     </div>
 
     <script>
-    // --- State ---
-    const VIDEO_W = 640, VIDEO_H = 480;
-    let isDrawing = false;
-    let currentPoints = [];
-    let clickTimer = null;
-    const CLICK_DELAY = 250; // ms debounce for click vs dblclick
+        // --- State ---
+        const VIDEO_W = 640, VIDEO_H = 480;
+        let isDrawing = false;
+        let currentPoints = [];
 
-    // --- DOM ---
-    const streamImg = document.getElementById('stream-img');
-    const canvas = document.getElementById('roi-canvas');
-    const ctx = canvas.getContext('2d');
-    const roiNameInput = document.getElementById('roi-name-input');
-    const btnDraw = document.getElementById('btn-draw');
-    const btnCancel = document.getElementById('btn-cancel');
-    const drawingHint = document.getElementById('drawing-hint');
-    const roiListEl = document.getElementById('roi-list');
-    const fpsEl = document.getElementById('fps-value');
-    const countEl = document.getElementById('count-value');
-    const dotEl = document.getElementById('status-dot');
-    const statusEl = document.getElementById('status-text');
+        // --- DOM ---
+        const streamImg = document.getElementById('stream-img');
+        const canvas = document.getElementById('roi-canvas');
+        const ctx = canvas.getContext('2d');
+        const roiNameInput = document.getElementById('roi-name-input');
+        const btnDraw = document.getElementById('btn-draw');
+        const btnCancel = document.getElementById('btn-cancel');
+        const drawingHint = document.getElementById('drawing-hint');
+        const roiListEl = document.getElementById('roi-list');
+        const fpsEl = document.getElementById('fps-value');
+        const countEl = document.getElementById('count-value');
+        const dotEl = document.getElementById('status-dot');
+        const statusEl = document.getElementById('status-text');
 
-    // --- Canvas sizing ---
-    function resizeCanvas() {
-        canvas.width = streamImg.clientWidth;
-        canvas.height = streamImg.clientHeight;
-        redrawCanvas();
-    }
-
-    streamImg.addEventListener('load', resizeCanvas);
-    window.addEventListener('resize', resizeCanvas);
-    // Initial sizing after image loads
-    if (streamImg.complete) resizeCanvas();
-
-    // --- Coordinate mapping ---
-    function canvasToVideo(cx, cy) {
-        return [
-            Math.round(cx / canvas.width * VIDEO_W),
-            Math.round(cy / canvas.height * VIDEO_H)
-        ];
-    }
-
-    function videoToCanvas(vx, vy) {
-        return [
-            vx / VIDEO_W * canvas.width,
-            vy / VIDEO_H * canvas.height
-        ];
-    }
-
-    // --- Drawing ---
-    function startDrawing() {
-        const name = roiNameInput.value.trim();
-        if (!name) {
-            roiNameInput.focus();
-            roiNameInput.style.borderColor = '#ff5252';
-            setTimeout(() => roiNameInput.style.borderColor = '', 1500);
-            return;
+        // --- Canvas sizing ---
+        function resizeCanvas() {
+            canvas.width = streamImg.clientWidth;
+            canvas.height = streamImg.clientHeight;
+            redrawCanvas();
         }
-        isDrawing = true;
-        currentPoints = [];
-        canvas.classList.add('drawing');
-        btnDraw.disabled = true;
-        btnCancel.disabled = false;
-        drawingHint.classList.add('visible');
-        roiNameInput.disabled = true;
-        redrawCanvas();
-    }
 
-    function cancelDrawing() {
-        isDrawing = false;
-        currentPoints = [];
-        canvas.classList.remove('drawing');
-        btnDraw.disabled = false;
-        btnCancel.disabled = true;
-        drawingHint.classList.remove('visible');
-        roiNameInput.disabled = false;
-        redrawCanvas();
-    }
+        streamImg.addEventListener('load', resizeCanvas);
+        window.addEventListener('resize', resizeCanvas);
+        // Initial sizing after image loads
+        if (streamImg.complete) resizeCanvas();
 
-    function finishDrawing() {
-        if (currentPoints.length < 3) {
-            cancelDrawing();
-            return;
+        // --- Coordinate mapping ---
+        function canvasToVideo(cx, cy) {
+            return [
+                Math.round(cx / canvas.width * VIDEO_W),
+                Math.round(cy / canvas.height * VIDEO_H)
+            ];
         }
-        const name = roiNameInput.value.trim();
-        const videoPoints = currentPoints.map(p => canvasToVideo(p[0], p[1]));
 
-        fetch('/api/roi', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({name: name, points: videoPoints})
-        })
-        .then(r => r.json())
-        .then(data => {
-            if (data.ok) {
-                roiNameInput.value = '';
-                loadROIList();
-            } else {
-                alert(data.error || 'ROI 추가 실패');
+        function videoToCanvas(vx, vy) {
+            return [
+                vx / VIDEO_W * canvas.width,
+                vy / VIDEO_H * canvas.height
+            ];
+        }
+
+        // --- Drawing ---
+        function startDrawing() {
+            const name = roiNameInput.value.trim();
+            if (!name) {
+                roiNameInput.focus();
+                roiNameInput.style.borderColor = '#ff5252';
+                setTimeout(() => roiNameInput.style.borderColor = '', 1500);
+                return;
             }
-        })
-        .catch(() => alert('서버 통신 실패'));
-
-        cancelDrawing();
-    }
-
-    function redrawCanvas() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        if (!isDrawing || currentPoints.length === 0) return;
-
-        // Draw in-progress polygon
-        ctx.setLineDash([6, 4]);
-        ctx.strokeStyle = '#ffab00';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(currentPoints[0][0], currentPoints[0][1]);
-        for (let i = 1; i < currentPoints.length; i++) {
-            ctx.lineTo(currentPoints[i][0], currentPoints[i][1]);
+            isDrawing = true;
+            currentPoints = [];
+            canvas.classList.add('drawing');
+            btnDraw.disabled = true;
+            btnCancel.disabled = false;
+            drawingHint.classList.add('visible');
+            roiNameInput.disabled = true;
+            redrawCanvas();
         }
-        ctx.stroke();
-        ctx.setLineDash([]);
 
-        // Draw vertices
-        for (const pt of currentPoints) {
+        function cancelDrawing() {
+            isDrawing = false;
+            currentPoints = [];
+            canvas.classList.remove('drawing');
+            btnDraw.disabled = false;
+            btnCancel.disabled = true;
+            drawingHint.classList.remove('visible');
+            roiNameInput.disabled = false;
+            redrawCanvas();
+        }
+
+        function finishDrawing() {
+            if (currentPoints.length < 3) {
+                alert('최소 3개의 꼭짓점이 필요합니다');
+                return;
+            }
+            const name = roiNameInput.value.trim();
+            const videoPoints = currentPoints.map(p => canvasToVideo(p[0], p[1]));
+
+            fetch('/api/roi', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name, points: videoPoints })
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        roiNameInput.value = '';
+                        loadROIList();
+                    } else {
+                        alert(data.error || 'ROI 추가 실패');
+                    }
+                })
+                .catch(() => alert('서버 통신 실패'));
+
+            cancelDrawing();
+        }
+
+        function redrawCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!isDrawing || currentPoints.length === 0) return;
+
+            // Draw in-progress polygon
+            ctx.setLineDash([6, 4]);
+            ctx.strokeStyle = '#ffab00';
+            ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.arc(pt[0], pt[1], 5, 0, Math.PI * 2);
-            ctx.fillStyle = '#ffab00';
-            ctx.fill();
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 1;
+            ctx.moveTo(currentPoints[0][0], currentPoints[0][1]);
+            for (let i = 1; i < currentPoints.length; i++) {
+                ctx.lineTo(currentPoints[i][0], currentPoints[i][1]);
+            }
             ctx.stroke();
-        }
-    }
+            ctx.setLineDash([]);
 
-    // --- Canvas click/dblclick with debounce ---
-    canvas.addEventListener('click', function(e) {
-        if (!isDrawing) return;
-        e.preventDefault();
-
-        if (clickTimer !== null) {
-            // This is a double-click: cancel the pending single-click
-            clearTimeout(clickTimer);
-            clickTimer = null;
-            finishDrawing();
-            return;
+            // Draw vertices
+            for (const pt of currentPoints) {
+                ctx.beginPath();
+                ctx.arc(pt[0], pt[1], 5, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffab00';
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
         }
 
-        clickTimer = setTimeout(() => {
-            clickTimer = null;
+        // --- Canvas click handler (left click to add points) ---
+        canvas.addEventListener('click', function (e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
             currentPoints.push([x, y]);
             redrawCanvas();
-        }, CLICK_DELAY);
-    });
+        });
 
-    canvas.addEventListener('dblclick', function(e) {
-        e.preventDefault();
-        // Already handled in click handler via timer
-    });
+        // --- Canvas right-click handler (finish drawing) ---
+        canvas.addEventListener('contextmenu', function (e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            finishDrawing();
+        });
 
-    // --- ROI List ---
-    function loadROIList() {
-        fetch('/api/roi')
-            .then(r => r.json())
-            .then(data => {
-                renderROIList(data.rois || []);
-            })
-            .catch(() => {});
-    }
-
-    function renderROIList(rois) {
-        if (rois.length === 0) {
-            roiListEl.innerHTML = '<li class="roi-empty">등록된 ROI가 없습니다</li>';
-            return;
+        // --- ROI List ---
+        function loadROIList() {
+            fetch('/api/roi')
+                .then(r => r.json())
+                .then(data => {
+                    renderROIList(data.rois || []);
+                })
+                .catch(() => { });
         }
-        roiListEl.innerHTML = rois.map(roi => {
-            const [b, g, r] = roi.color;
-            const cssColor = `rgb(${r},${g},${b})`;
-            return `
+
+        function renderROIList(rois) {
+            if (rois.length === 0) {
+                roiListEl.innerHTML = '<li class="roi-empty">등록된 ROI가 없습니다</li>';
+                return;
+            }
+            roiListEl.innerHTML = rois.map(roi => {
+                const [b, g, r] = roi.color;
+                const cssColor = `rgb(${r},${g},${b})`;
+                return `
                 <li class="roi-list-item" data-name="${escHtml(roi.name)}">
                     <div class="roi-info">
                         <span class="roi-color-dot" style="background:${cssColor}"></span>
@@ -431,66 +496,67 @@
                     <button class="btn btn-danger btn-sm" onclick="deleteROI('${escJs(roi.name)}')">삭제</button>
                 </li>
             `;
-        }).join('');
-    }
-
-    function deleteROI(name) {
-        fetch('/api/roi/' + encodeURIComponent(name), {method: 'DELETE'})
-            .then(r => r.json())
-            .then(data => {
-                if (data.ok) loadROIList();
-                else alert(data.error || '삭제 실패');
-            })
-            .catch(() => alert('서버 통신 실패'));
-    }
-
-    // --- Stats polling ---
-    async function fetchStats() {
-        try {
-            const res = await fetch('/api/stats');
-            const data = await res.json();
-            fpsEl.textContent = data.fps.toFixed(1);
-            countEl.textContent = data.person_count;
-            if (data.detector_active) {
-                dotEl.className = 'dot';
-                statusEl.textContent = '검출기 활성 · 실시간 스트리밍 중';
-            } else {
-                dotEl.className = 'dot inactive';
-                statusEl.textContent = '검출기 비활성 · 스트리밍만 동작 중';
-            }
-
-            // Update ROI counts
-            if (data.roi_counts) {
-                for (const [name, cnt] of Object.entries(data.roi_counts)) {
-                    const el = document.getElementById('roi-cnt-' + name);
-                    if (el) el.textContent = cnt;
-                }
-            }
-        } catch {
-            dotEl.className = 'dot inactive';
-            statusEl.textContent = '서버 연결 실패';
-            fpsEl.textContent = '-';
-            countEl.textContent = '-';
+            }).join('');
         }
-    }
 
-    // --- Helpers ---
-    function escHtml(s) {
-        const d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
-    }
-    function escAttr(s) {
-        return s.replace(/[^a-zA-Z0-9가-힣_-]/g, '_');
-    }
-    function escJs(s) {
-        return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-    }
+        function deleteROI(name) {
+            fetch('/api/roi/' + encodeURIComponent(name), { method: 'DELETE' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) loadROIList();
+                    else alert(data.error || '삭제 실패');
+                })
+                .catch(() => alert('서버 통신 실패'));
+        }
 
-    // --- Init ---
-    loadROIList();
-    fetchStats();
-    setInterval(fetchStats, 1000);
+        // --- Stats polling ---
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                fpsEl.textContent = data.fps.toFixed(1);
+                countEl.textContent = data.person_count;
+                if (data.detector_active) {
+                    dotEl.className = 'dot';
+                    statusEl.textContent = '검출기 활성 · 실시간 스트리밍 중';
+                } else {
+                    dotEl.className = 'dot inactive';
+                    statusEl.textContent = '검출기 비활성 · 스트리밍만 동작 중';
+                }
+
+                // Update ROI counts
+                if (data.roi_counts) {
+                    for (const [name, cnt] of Object.entries(data.roi_counts)) {
+                        const el = document.getElementById('roi-cnt-' + name);
+                        if (el) el.textContent = cnt;
+                    }
+                }
+            } catch {
+                dotEl.className = 'dot inactive';
+                statusEl.textContent = '서버 연결 실패';
+                fpsEl.textContent = '-';
+                countEl.textContent = '-';
+            }
+        }
+
+        // --- Helpers ---
+        function escHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+        function escAttr(s) {
+            return s.replace(/[^a-zA-Z0-9가-힣_-]/g, '_');
+        }
+        function escJs(s) {
+            return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        }
+
+        // --- Init ---
+        loadROIList();
+        fetchStats();
+        setInterval(fetchStats, 1000);
     </script>
 </body>
+
 </html>
