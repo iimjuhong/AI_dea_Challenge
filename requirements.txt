@@ -1,10 +1,2 @@
-# Jetson 시스템 패키지만 사용 - pip install 하지 않음
-# venv는 --system-site-packages 옵션으로 생성하여 시스템 라이브러리 접근
-#
-# 시스템 제공 패키지:
-#   opencv (4.8, GStreamer+CUDA)
-#   numpy (1.21)
-#   tensorrt (10.3)
-#   flask (2.0)
-#   pyyaml (5.4)
-#   pycuda
+flask>=3.0
+pyyaml>=6.0

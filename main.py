@@ -6,6 +6,7 @@ import sys
 
 from src.core.camera import CameraManager
 from src.core.detector import YOLOv8Detector
+from src.core.roi_manager import ROIManager
 from src.web.app import app, init_app
 
 logging.basicConfig(
@@ -37,6 +38,8 @@ def parse_args():
                         help='검출 신뢰도 임계값')
     parser.add_argument('--no-fp16', action='store_true',
                         help='FP16 추론 비활성화 (FP32 사용)')
+    parser.add_argument('--roi-config', type=str, default='config/roi_config.json',
+                        help='ROI 설정 파일 경로')
     return parser.parse_args()
 
 
@@ -66,6 +69,10 @@ def main():
             logger.warning("검출기 초기화 실패. 검출 없이 스트리밍만 진행합니다.")
             detector = None
 
+    # ROI 매니저 초기화
+    roi_mgr = ROIManager(config_path=args.roi_config)
+    roi_mgr.load()
+
     def shutdown(signum, frame):
         logger.info("종료 시그널 수신, 정리 중...")
         camera.stop()
@@ -80,7 +87,7 @@ def main():
         logger.error("카메라 시작 실패. 종료합니다.")
         sys.exit(1)
 
-    init_app(camera, detector)
+    init_app(camera, detector, roi_mgr)
 
     logger.info(f"서버 시작: http://{args.host}:{args.port}")
     try:
