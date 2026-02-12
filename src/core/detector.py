@@ -1,6 +1,8 @@
+import ctypes
 import logging
 import os
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -16,39 +18,140 @@ except ImportError:
     TRT_AVAILABLE = False
     logger.warning("TensorRT를 찾을 수 없습니다. 검출기 비활성화.")
 
+
+# --- ctypes CUDA Runtime wrapper (pycuda 대체) ---
+
+class CudaRT:
+    """ctypes를 사용한 CUDA Runtime API 래퍼
+
+    PyCUDA 없이 cudaMalloc/cudaMemcpy/cudaFree/cudaStream 등을 직접 호출한다.
+    """
+
+    # cudaMemcpyKind enum
+    cudaMemcpyHostToDevice = 1
+    cudaMemcpyDeviceToHost = 2
+
+    def __init__(self):
+        # libcudart.so 로드 시도
+        lib_paths = [
+            '/usr/local/cuda-12.6/lib64/libcudart.so',
+            '/usr/local/cuda/lib64/libcudart.so',
+            'libcudart.so',
+        ]
+        self._lib = None
+        for path in lib_paths:
+            try:
+                self._lib = ctypes.CDLL(path)
+                logger.info(f"CUDA Runtime 로드 성공: {path}")
+                break
+            except OSError:
+                continue
+
+        if self._lib is None:
+            raise RuntimeError("libcudart.so를 로드할 수 없습니다")
+
+        # 함수 시그니처 설정
+        self._lib.cudaMalloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]
+        self._lib.cudaMalloc.restype = ctypes.c_int
+
+        self._lib.cudaFree.argtypes = [ctypes.c_void_p]
+        self._lib.cudaFree.restype = ctypes.c_int
+
+        self._lib.cudaMemcpy.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int
+        ]
+        self._lib.cudaMemcpy.restype = ctypes.c_int
+
+        self._lib.cudaStreamCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        self._lib.cudaStreamCreate.restype = ctypes.c_int
+
+        self._lib.cudaStreamDestroy.argtypes = [ctypes.c_void_p]
+        self._lib.cudaStreamDestroy.restype = ctypes.c_int
+
+        self._lib.cudaStreamSynchronize.argtypes = [ctypes.c_void_p]
+        self._lib.cudaStreamSynchronize.restype = ctypes.c_int
+
+    def malloc(self, size):
+        """GPU 메모리 할당, 디바이스 포인터(int) 반환"""
+        ptr = ctypes.c_void_p()
+        err = self._lib.cudaMalloc(ctypes.byref(ptr), size)
+        if err != 0:
+            raise RuntimeError(f"cudaMalloc 실패 (err={err})")
+        return ptr.value
+
+    def free(self, d_ptr):
+        """GPU 메모리 해제"""
+        err = self._lib.cudaFree(ctypes.c_void_p(d_ptr))
+        if err != 0:
+            logger.warning(f"cudaFree 경고 (err={err})")
+
+    def memcpy_htod(self, d_ptr, host_arr):
+        """호스트 numpy array → 디바이스 복사"""
+        err = self._lib.cudaMemcpy(
+            ctypes.c_void_p(d_ptr),
+            host_arr.ctypes.data_as(ctypes.c_void_p),
+            host_arr.nbytes,
+            self.cudaMemcpyHostToDevice,
+        )
+        if err != 0:
+            raise RuntimeError(f"cudaMemcpy HtoD 실패 (err={err})")
+
+    def memcpy_dtoh(self, host_arr, d_ptr):
+        """디바이스 → 호스트 numpy array 복사"""
+        err = self._lib.cudaMemcpy(
+            host_arr.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_void_p(d_ptr),
+            host_arr.nbytes,
+            self.cudaMemcpyDeviceToHost,
+        )
+        if err != 0:
+            raise RuntimeError(f"cudaMemcpy DtoH 실패 (err={err})")
+
+    def stream_create(self):
+        """CUDA 스트림 생성, 핸들(int) 반환"""
+        handle = ctypes.c_void_p()
+        err = self._lib.cudaStreamCreate(ctypes.byref(handle))
+        if err != 0:
+            raise RuntimeError(f"cudaStreamCreate 실패 (err={err})")
+        return handle.value
+
+    def stream_synchronize(self, stream_handle):
+        """CUDA 스트림 동기화"""
+        err = self._lib.cudaStreamSynchronize(ctypes.c_void_p(stream_handle))
+        if err != 0:
+            raise RuntimeError(f"cudaStreamSynchronize 실패 (err={err})")
+
+    def stream_destroy(self, stream_handle):
+        """CUDA 스트림 파괴"""
+        err = self._lib.cudaStreamDestroy(ctypes.c_void_p(stream_handle))
+        if err != 0:
+            logger.warning(f"cudaStreamDestroy 경고 (err={err})")
+
+
+# CudaRT 싱글톤
 try:
-    import pycuda.driver as cuda
-    import pycuda.autoinit  # noqa: F401 - CUDA 컨텍스트 초기화에 필요
+    _cuda_rt = CudaRT()
     CUDA_AVAILABLE = True
-except ImportError:
+except RuntimeError as e:
+    _cuda_rt = None
     CUDA_AVAILABLE = False
-    if TRT_AVAILABLE:
-        logger.warning("PyCUDA를 찾을 수 없습니다. TensorRT 추론 불가.")
+    logger.warning(f"CUDA Runtime 초기화 실패: {e}")
 
 
 class YOLOv8Detector:
-    """TensorRT 10.3 기반 YOLOv8 객체 검출기
+    """TensorRT 기반 YOLOv8 객체 검출기 (ctypes CUDA 사용)
 
     기능:
     - ONNX → TensorRT 엔진 변환 및 캐싱
     - FP16 추론 (Jetson Orin Nano GPU 활용)
     - NMS 후처리 포함
+    - FPS 측정
     """
 
-    # COCO 클래스 중 사람(person) 인덱스
     PERSON_CLASS_ID = 0
 
     def __init__(self, model_path, conf_threshold=0.5, nms_threshold=0.45,
                  input_size=640, fp16=True, target_classes=None):
-        """
-        Args:
-            model_path: ONNX 모델 파일 경로
-            conf_threshold: 검출 신뢰도 임계값
-            nms_threshold: NMS IoU 임계값
-            input_size: 모델 입력 크기 (정사각형)
-            fp16: FP16 추론 사용 여부
-            target_classes: 검출할 클래스 ID 리스트 (None이면 전체)
-        """
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.nms_threshold = nms_threshold
@@ -62,13 +165,19 @@ class YOLOv8Detector:
         self._output_buf = None
         self._d_input = None
         self._d_output = None
-        self._stream = None
         self._ready = False
+
+        # FPS 측정
+        self._fps = 0.0
+        self._frame_times = deque(maxlen=30)
+
+        # 최근 검출 수
+        self._last_det_count = 0
 
     def initialize(self):
         """엔진 로드 또는 빌드 후 추론 준비"""
         if not TRT_AVAILABLE or not CUDA_AVAILABLE:
-            logger.error("TensorRT 또는 PyCUDA가 없어 검출기를 초기화할 수 없습니다")
+            logger.error("TensorRT 또는 CUDA Runtime이 없어 검출기를 초기화할 수 없습니다")
             return False
 
         if not os.path.exists(self.model_path):
@@ -127,7 +236,6 @@ class YOLOv8Detector:
         elapsed = time.time() - start
         logger.info(f"엔진 빌드 완료 ({elapsed:.1f}초)")
 
-        # 엔진 캐시 저장
         with open(engine_path, 'wb') as f:
             f.write(serialized)
         logger.info(f"엔진 캐시 저장: {engine_path}")
@@ -142,31 +250,31 @@ class YOLOv8Detector:
             return runtime.deserialize_cuda_engine(f.read())
 
     def _allocate_buffers(self):
-        """입출력 GPU/CPU 버퍼 할당"""
-        self._stream = cuda.Stream()
-
+        """입출력 GPU/CPU 버퍼 할당 (ctypes CUDA)"""
         # 입력 텐서
         input_name = self.engine.get_tensor_name(0)
         input_shape = self.engine.get_tensor_shape(input_name)
-        input_size = int(np.prod(input_shape)) * np.float32().itemsize
+        input_nbytes = int(np.prod(input_shape)) * np.float32().itemsize
         self._input_buf = np.zeros(input_shape, dtype=np.float32)
-        self._d_input = cuda.mem_alloc(input_size)
+        self._d_input = _cuda_rt.malloc(input_nbytes)
 
         # 출력 텐서
         output_name = self.engine.get_tensor_name(1)
         output_shape = self.engine.get_tensor_shape(output_name)
-        output_size = int(np.prod(output_shape)) * np.float32().itemsize
+        output_nbytes = int(np.prod(output_shape)) * np.float32().itemsize
         self._output_buf = np.zeros(output_shape, dtype=np.float32)
-        self._d_output = cuda.mem_alloc(output_size)
+        self._d_output = _cuda_rt.malloc(output_nbytes)
 
-        # I/O 텐서 주소 설정
-        self.context.set_tensor_address(input_name, int(self._d_input))
-        self.context.set_tensor_address(output_name, int(self._d_output))
+        # I/O 텐서 주소 설정 (execute_v2 용)
+        self.context.set_tensor_address(input_name, self._d_input)
+        self.context.set_tensor_address(output_name, self._d_output)
 
         self._input_name = input_name
         self._output_name = output_name
+        self._bindings = [self._d_input, self._d_output]
 
-        logger.info(f"입력: {input_name} {input_shape}, 출력: {output_name} {output_shape}")
+        logger.info(f"입력: {input_name} {list(input_shape)}, "
+                    f"출력: {output_name} {list(output_shape)}")
 
     def detect(self, frame):
         """프레임에서 객체 검출
@@ -180,29 +288,37 @@ class YOLOv8Detector:
         if not self._ready:
             return []
 
+        t_start = time.time()
+
         img_h, img_w = frame.shape[:2]
         input_tensor = self._preprocess(frame)
 
-        # GPU로 입력 전송
+        # GPU로 입력 전송 (동기)
         np.copyto(self._input_buf, input_tensor)
-        cuda.memcpy_htod_async(self._d_input, self._input_buf, self._stream)
+        _cuda_rt.memcpy_htod(self._d_input, self._input_buf)
 
-        # 추론
-        self.context.execute_async_v3(stream_handle=self._stream.handle)
+        # 추론 (execute_v2 — 동기식)
+        self.context.execute_v2(self._bindings)
 
-        # 결과 수신
-        cuda.memcpy_dtoh_async(self._output_buf, self._d_output, self._stream)
-        self._stream.synchronize()
+        # 결과 수신 (동기)
+        _cuda_rt.memcpy_dtoh(self._output_buf, self._d_output)
 
         # 후처리
         detections = self._postprocess(self._output_buf, img_w, img_h)
+
+        # FPS 측정
+        elapsed = time.time() - t_start
+        self._frame_times.append(elapsed)
+        if len(self._frame_times) > 0:
+            self._fps = len(self._frame_times) / sum(self._frame_times)
+
+        self._last_det_count = len(detections)
         return detections
 
     def _preprocess(self, frame):
         """YOLOv8 입력 전처리: letterbox resize + normalize"""
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Letterbox resize
         h, w = img.shape[:2]
         scale = min(self.input_size / w, self.input_size / h)
         new_w, new_h = int(w * scale), int(h * scale)
@@ -212,7 +328,6 @@ class YOLOv8Detector:
         dy, dx = (self.input_size - new_h) // 2, (self.input_size - new_w) // 2
         canvas[dy:dy + new_h, dx:dx + new_w] = img
 
-        # HWC → CHW, normalize to [0, 1]
         tensor = canvas.astype(np.float32) / 255.0
         tensor = tensor.transpose(2, 0, 1)
         tensor = np.expand_dims(tensor, axis=0)
@@ -223,15 +338,12 @@ class YOLOv8Detector:
 
         YOLOv8 출력 형태: [1, 84, 8400] (cx, cy, w, h, class_scores...)
         """
-        # [1, 84, 8400] → [8400, 84]
         preds = output[0].T
 
-        # 클래스 스코어 및 ID
         class_scores = preds[:, 4:]
         class_ids = np.argmax(class_scores, axis=1)
         confidences = class_scores[np.arange(len(class_ids)), class_ids]
 
-        # 신뢰도 필터
         mask = confidences > self.conf_threshold
         if self.target_classes is not None:
             class_mask = np.isin(class_ids, self.target_classes)
@@ -244,14 +356,12 @@ class YOLOv8Detector:
         if len(preds) == 0:
             return []
 
-        # cx, cy, w, h → x1, y1, x2, y2
         boxes = preds[:, :4].copy()
-        boxes[:, 0] = preds[:, 0] - preds[:, 2] / 2  # x1
-        boxes[:, 1] = preds[:, 1] - preds[:, 3] / 2  # y1
-        boxes[:, 2] = preds[:, 0] + preds[:, 2] / 2  # x2
-        boxes[:, 3] = preds[:, 1] + preds[:, 3] / 2  # y2
+        boxes[:, 0] = preds[:, 0] - preds[:, 2] / 2
+        boxes[:, 1] = preds[:, 1] - preds[:, 3] / 2
+        boxes[:, 2] = preds[:, 0] + preds[:, 2] / 2
+        boxes[:, 3] = preds[:, 1] + preds[:, 3] / 2
 
-        # letterbox 좌표 → 원본 이미지 좌표
         scale = min(self.input_size / img_w, self.input_size / img_h)
         dx = (self.input_size - img_w * scale) / 2
         dy = (self.input_size - img_h * scale) / 2
@@ -259,11 +369,9 @@ class YOLOv8Detector:
         boxes[:, [0, 2]] = (boxes[:, [0, 2]] - dx) / scale
         boxes[:, [1, 3]] = (boxes[:, [1, 3]] - dy) / scale
 
-        # 범위 클리핑
         boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, img_w)
         boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, img_h)
 
-        # NMS
         indices = cv2.dnn.NMSBoxes(
             boxes.tolist(), confidences.tolist(),
             self.conf_threshold, self.nms_threshold
@@ -281,6 +389,14 @@ class YOLOv8Detector:
 
         return results
 
+    def get_fps(self):
+        """현재 추론 FPS 반환"""
+        return round(self._fps, 1)
+
+    def get_detection_count(self):
+        """마지막 프레임의 검출 수 반환"""
+        return self._last_det_count
+
     @property
     def is_ready(self):
         return self._ready
@@ -290,7 +406,10 @@ class YOLOv8Detector:
         self._ready = False
         self.context = None
         self.engine = None
-        self._d_input = None
-        self._d_output = None
-        self._stream = None
+        if self._d_input is not None and _cuda_rt is not None:
+            _cuda_rt.free(self._d_input)
+            self._d_input = None
+        if self._d_output is not None and _cuda_rt is not None:
+            _cuda_rt.free(self._d_output)
+            self._d_output = None
         logger.info("검출기 리소스 해제 완료")
