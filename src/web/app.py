@@ -1,3 +1,6 @@
+import threading
+import time
+
 import cv2
 import logging
 from flask import Flask, Response, render_template, jsonify, request
@@ -6,22 +9,186 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# ============================================================
+#  아키텍처: 3-Thread 파이프라인
+#
+#  Thread 1 (Camera)    : CameraManager._capture_loop (기존)
+#      └→ 최신 프레임을 _frame에 저장, get_frame()으로 폴링
+#
+#  Thread 2 (Inference)  : _inference_loop
+#      └→ get_frame() → YOLO → ROI → JPEG → FrameBuffer.put()
+#      └→ 네트워크와 완전 독립, 절대 블로킹 안 됨
+#
+#  Thread 3 (Network/Flask) : generate_frames()
+#      └→ FrameBuffer.get() → yield MJPEG
+#      └→ 느린 클라이언트는 프레임 스킵 (항상 최신만 수신)
+#      └→ 와이파이가 끊겨도 Inference 스레드에 영향 없음
+# ============================================================
+
 # main.py에서 주입
 camera = None
 detector = None
 roi_manager = None
 
-# ROI별 인원 수 캐시 (generate_frames에서 갱신)
 _latest_roi_counts = {}
+_inference_thread = None
 
+_TARGET_FPS = 15
+
+
+# --- FrameBuffer: Inference → Network 사이 논블로킹 버퍼 ---
+
+class FrameBuffer:
+    """스레드 안전 프레임 버퍼 (최신 1프레임만 유지, 오래된 프레임 자동 폐기)
+
+    - put(): 항상 즉시 반환 (논블로킹). 이전 프레임은 덮어쓰기 (드롭).
+    - get(): 새 프레임 도착까지 대기. 타임아웃 시 None 반환.
+    - 여러 소비자(MJPEG 클라이언트)가 동시에 읽어도 안전.
+    - 느린 소비자는 중간 프레임을 건너뛰고 항상 최신 프레임을 받음.
+    """
+
+    def __init__(self):
+        self._jpeg = None
+        self._frame_id = 0
+        self._cond = threading.Condition()
+
+    def put(self, jpeg_bytes):
+        """새 프레임 저장. 논블로킹, 이전 프레임 덮어쓰기."""
+        with self._cond:
+            self._jpeg = jpeg_bytes
+            self._frame_id += 1
+            self._cond.notify_all()
+
+    def get(self, prev_id=0, timeout=1.0):
+        """새 프레임 대기 후 반환.
+
+        Args:
+            prev_id: 마지막으로 받은 frame_id (중복 방지)
+            timeout: 최대 대기 시간 (초)
+
+        Returns:
+            (jpeg_bytes, frame_id) — 새 프레임이 있으면
+            (None, prev_id)        — 타임아웃 시
+        """
+        with self._cond:
+            if self._frame_id == prev_id:
+                self._cond.wait(timeout=timeout)
+            if self._frame_id != prev_id:
+                return self._jpeg, self._frame_id
+            return None, prev_id
+
+
+_frame_buf = FrameBuffer()
+
+
+# --- init ---
 
 def init_app(camera_manager, detector_instance=None, roi_manager_instance=None):
-    """Flask 앱에 카메라 매니저, 검출기, ROI 매니저 연결"""
-    global camera, detector, roi_manager
+    """Flask 앱에 카메라/검출기/ROI 매니저 연결 후 Inference 스레드 시작"""
+    global camera, detector, roi_manager, _inference_thread
     camera = camera_manager
     detector = detector_instance
     roi_manager = roi_manager_instance
 
+    if _inference_thread is None:
+        _inference_thread = threading.Thread(target=_inference_loop, daemon=True)
+        _inference_thread.start()
+        logger.info("Inference 스레드 시작")
+
+
+# --- Thread 2: Inference Loop ---
+
+def _inference_loop():
+    """[Inference 스레드] 카메라 → 검출 → ROI → JPEG → FrameBuffer
+
+    - 네트워크와 완전 분리: put()은 항상 논블로킹
+    - 예외 발생 시 스레드가 죽지 않고 복구
+    - Queue가 꽉 차는 개념 없음 (최신 1프레임 덮어쓰기)
+    """
+    global _latest_roi_counts
+    target_interval = 1.0 / _TARGET_FPS
+    error_count = 0
+
+    while True:
+        try:
+            t0 = time.monotonic()
+
+            # 카메라 대기
+            if camera is None or not camera.is_running:
+                time.sleep(0.1)
+                continue
+
+            frame = camera.get_frame()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            # --- 검출 (실패 시 원본 프레임으로 계속) ---
+            detections = []
+            if detector is not None and detector.is_ready:
+                try:
+                    detections = detector.detect(frame)
+                    frame = _annotate_frame(frame, detections)
+                    frame = _overlay_fps(frame, detector.get_fps())
+                except Exception as e:
+                    logger.warning(f"검출 오류 (스킵): {e}")
+
+            # --- ROI (실패 시 오버레이 없이 계속) ---
+            if roi_manager is not None:
+                try:
+                    if detections:
+                        _latest_roi_counts = roi_manager.count_per_roi(detections)
+                    elif detector is not None and detector.is_ready:
+                        rois = roi_manager.get_all_rois()
+                        _latest_roi_counts = {r["name"]: 0 for r in rois}
+                    frame = roi_manager.draw_rois(frame)
+                except Exception as e:
+                    logger.warning(f"ROI 오류 (스킵): {e}")
+
+            # --- JPEG 인코딩 → FrameBuffer (논블로킹) ---
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ret:
+                _frame_buf.put(buffer.tobytes())
+                error_count = 0
+
+            # FPS 조절
+            elapsed = time.monotonic() - t0
+            sleep_time = target_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        except Exception as e:
+            error_count += 1
+            logger.error(f"Inference 오류 ({error_count}회): {e}", exc_info=True)
+            time.sleep(min(error_count * 0.5, 5.0))
+
+
+# --- Thread 3: Network Sender (Flask MJPEG generators) ---
+
+def generate_frames():
+    """[Network 스레드] FrameBuffer에서 최신 JPEG를 읽어 MJPEG 스트림 전송
+
+    - Inference 스레드와 완전 독립
+    - 느린 클라이언트는 프레임을 건너뜀 (frame_id 추적)
+    - 와이파이 끊김 → 이 generator만 멈춤, Inference는 계속 동작
+    """
+    last_id = 0
+    try:
+        while True:
+            jpeg, last_id = _frame_buf.get(prev_id=last_id, timeout=1.0)
+            if jpeg is None:
+                # 타임아웃 — 아직 프레임 없음, 재시도
+                continue
+
+            yield (
+                b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n'
+            )
+    except GeneratorExit:
+        return
+
+
+# --- Drawing helpers ---
 
 def _annotate_frame(frame, detections):
     """프레임에 검출 결과 오버레이"""
@@ -52,54 +219,15 @@ def _overlay_fps(frame, fps):
     return frame
 
 
-def generate_frames():
-    """MJPEG 스트리밍용 프레임 제너레이터"""
-    global _latest_roi_counts
-
-    while True:
-        if camera is None:
-            continue
-
-        frame = camera.get_frame()
-        if frame is None:
-            continue
-
-        # 검출기가 활성화된 경우 추론 및 오버레이
-        detections = []
-        if detector is not None and detector.is_ready:
-            detections = detector.detect(frame)
-            frame = _annotate_frame(frame, detections)
-            frame = _overlay_fps(frame, detector.get_fps())
-
-        # ROI 오버레이 및 인원 수 갱신
-        if roi_manager is not None:
-            if detections:
-                _latest_roi_counts = roi_manager.count_per_roi(detections)
-            elif detector is not None and detector.is_ready:
-                # 검출기 활성이나 검출 없음 → 모든 ROI 0명
-                rois = roi_manager.get_all_rois()
-                _latest_roi_counts = {r["name"]: 0 for r in rois}
-            frame = roi_manager.draw_rois(frame)
-
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if not ret:
-            continue
-
-        yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n'
-        )
-
+# --- Routes ---
 
 @app.route('/')
 def index():
-    """메인 페이지"""
     return render_template('index.html')
 
 
 @app.route('/video_feed')
 def video_feed():
-    """MJPEG 스트리밍 엔드포인트"""
     return Response(
         generate_frames(),
         mimetype='multipart/x-mixed-replace; boundary=frame'
@@ -108,7 +236,6 @@ def video_feed():
 
 @app.route('/api/stats')
 def api_stats():
-    """실시간 통계 API: FPS, 검출된 사람 수, ROI별 인원 수"""
     if detector is not None and detector.is_ready:
         return jsonify({
             'fps': detector.get_fps(),
@@ -128,7 +255,6 @@ def api_stats():
 
 @app.route('/api/roi', methods=['GET'])
 def api_roi_list():
-    """전체 ROI 목록 반환"""
     if roi_manager is None:
         return jsonify({'error': 'ROI manager not initialized'}), 503
     return jsonify({'rois': roi_manager.get_all_rois()})
@@ -136,7 +262,6 @@ def api_roi_list():
 
 @app.route('/api/roi', methods=['POST'])
 def api_roi_add():
-    """ROI 추가: {name, points, color?}"""
     if roi_manager is None:
         return jsonify({'error': 'ROI manager not initialized'}), 503
 
@@ -160,13 +285,11 @@ def api_roi_add():
 
 @app.route('/api/roi/stats', methods=['GET'])
 def api_roi_stats():
-    """ROI별 인원 수 반환"""
     return jsonify({'roi_counts': _latest_roi_counts})
 
 
 @app.route('/api/roi/<name>', methods=['PUT'])
 def api_roi_update(name):
-    """ROI 수정"""
     if roi_manager is None:
         return jsonify({'error': 'ROI manager not initialized'}), 503
 
@@ -187,7 +310,6 @@ def api_roi_update(name):
 
 @app.route('/api/roi/<name>', methods=['DELETE'])
 def api_roi_delete(name):
-    """ROI 삭제"""
     if roi_manager is None:
         return jsonify({'error': 'ROI manager not initialized'}), 503
 
@@ -198,7 +320,6 @@ def api_roi_delete(name):
 
 @app.route('/health')
 def health():
-    """헬스체크"""
     running = camera is not None and camera.is_running
     det_ready = detector is not None and detector.is_ready
     return jsonify({
