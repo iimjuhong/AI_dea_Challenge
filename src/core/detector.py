@@ -71,6 +71,22 @@ class CudaRT:
         self._lib.cudaStreamSynchronize.argtypes = [ctypes.c_void_p]
         self._lib.cudaStreamSynchronize.restype = ctypes.c_int
 
+        # 비동기 메모리 전송
+        self._lib.cudaMemcpyAsync.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_int, ctypes.c_void_p,
+        ]
+        self._lib.cudaMemcpyAsync.restype = ctypes.c_int
+
+        # Pinned (page-locked) 호스트 메모리 — 비동기 DMA 전송 필수
+        self._lib.cudaMallocHost.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t,
+        ]
+        self._lib.cudaMallocHost.restype = ctypes.c_int
+
+        self._lib.cudaFreeHost.argtypes = [ctypes.c_void_p]
+        self._lib.cudaFreeHost.restype = ctypes.c_int
+
     def malloc(self, size):
         """GPU 메모리 할당, 디바이스 포인터(int) 반환"""
         ptr = ctypes.c_void_p()
@@ -127,6 +143,44 @@ class CudaRT:
         if err != 0:
             logger.warning(f"cudaStreamDestroy 경고 (err={err})")
 
+    def memcpy_htod_async(self, d_ptr, host_arr, stream):
+        """호스트 → 디바이스 비동기 복사 (pinned memory 필요)"""
+        err = self._lib.cudaMemcpyAsync(
+            ctypes.c_void_p(d_ptr),
+            host_arr.ctypes.data_as(ctypes.c_void_p),
+            host_arr.nbytes,
+            self.cudaMemcpyHostToDevice,
+            ctypes.c_void_p(stream),
+        )
+        if err != 0:
+            raise RuntimeError(f"cudaMemcpyAsync HtoD 실패 (err={err})")
+
+    def memcpy_dtoh_async(self, host_arr, d_ptr, stream):
+        """디바이스 → 호스트 비동기 복사 (pinned memory 필요)"""
+        err = self._lib.cudaMemcpyAsync(
+            host_arr.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_void_p(d_ptr),
+            host_arr.nbytes,
+            self.cudaMemcpyDeviceToHost,
+            ctypes.c_void_p(stream),
+        )
+        if err != 0:
+            raise RuntimeError(f"cudaMemcpyAsync DtoH 실패 (err={err})")
+
+    def malloc_host(self, size):
+        """Pinned (page-locked) 호스트 메모리 할당"""
+        ptr = ctypes.c_void_p()
+        err = self._lib.cudaMallocHost(ctypes.byref(ptr), size)
+        if err != 0:
+            raise RuntimeError(f"cudaMallocHost 실패 (err={err})")
+        return ptr.value
+
+    def free_host(self, h_ptr):
+        """Pinned 호스트 메모리 해제"""
+        err = self._lib.cudaFreeHost(ctypes.c_void_p(h_ptr))
+        if err != 0:
+            logger.warning(f"cudaFreeHost 경고 (err={err})")
+
 
 # CudaRT 싱글톤
 try:
@@ -165,6 +219,10 @@ class YOLOv8Detector:
         self._output_buf = None
         self._d_input = None
         self._d_output = None
+        self._stream = None
+        self._use_async = False
+        self._input_pinned_ptr = None
+        self._output_pinned_ptr = None
         self._ready = False
 
         # FPS 측정
@@ -250,22 +308,45 @@ class YOLOv8Detector:
             return runtime.deserialize_cuda_engine(f.read())
 
     def _allocate_buffers(self):
-        """입출력 GPU/CPU 버퍼 할당 (ctypes CUDA)"""
+        """입출력 GPU/CPU 버퍼 할당 (pinned memory + CUDA stream)"""
         # 입력 텐서
         input_name = self.engine.get_tensor_name(0)
         input_shape = self.engine.get_tensor_shape(input_name)
-        input_nbytes = int(np.prod(input_shape)) * np.float32().itemsize
-        self._input_buf = np.zeros(input_shape, dtype=np.float32)
+        input_n = int(np.prod(input_shape))
+        input_nbytes = input_n * np.float32().itemsize
         self._d_input = _cuda_rt.malloc(input_nbytes)
 
         # 출력 텐서
         output_name = self.engine.get_tensor_name(1)
         output_shape = self.engine.get_tensor_shape(output_name)
-        output_nbytes = int(np.prod(output_shape)) * np.float32().itemsize
-        self._output_buf = np.zeros(output_shape, dtype=np.float32)
+        output_n = int(np.prod(output_shape))
+        output_nbytes = output_n * np.float32().itemsize
         self._d_output = _cuda_rt.malloc(output_nbytes)
 
-        # I/O 텐서 주소 설정 (execute_v2 용)
+        # Pinned memory 할당 시도 (비동기 DMA 전송용)
+        try:
+            self._input_pinned_ptr = _cuda_rt.malloc_host(input_nbytes)
+            c_in = (ctypes.c_float * input_n).from_address(self._input_pinned_ptr)
+            self._input_buf = np.ctypeslib.as_array(c_in).reshape(input_shape)
+
+            self._output_pinned_ptr = _cuda_rt.malloc_host(output_nbytes)
+            c_out = (ctypes.c_float * output_n).from_address(self._output_pinned_ptr)
+            self._output_buf = np.ctypeslib.as_array(c_out).reshape(output_shape)
+
+            self._use_async = True
+            logger.info("Pinned memory 할당 성공 → 비동기 GPU 전송 활성화")
+        except (RuntimeError, Exception) as e:
+            self._input_pinned_ptr = None
+            self._output_pinned_ptr = None
+            self._input_buf = np.zeros(input_shape, dtype=np.float32)
+            self._output_buf = np.zeros(output_shape, dtype=np.float32)
+            self._use_async = False
+            logger.info(f"Pinned memory 불가 → 동기 전송 사용: {e}")
+
+        # CUDA 스트림 생성
+        self._stream = _cuda_rt.stream_create()
+
+        # I/O 텐서 주소 설정
         self.context.set_tensor_address(input_name, self._d_input)
         self.context.set_tensor_address(output_name, self._d_output)
 
@@ -293,15 +374,25 @@ class YOLOv8Detector:
         img_h, img_w = frame.shape[:2]
         input_tensor = self._preprocess(frame)
 
-        # GPU로 입력 전송 (동기)
+        # GPU 파이프라인: pinned memory 시 비동기, 아니면 동기 폴백
         np.copyto(self._input_buf, input_tensor)
-        _cuda_rt.memcpy_htod(self._d_input, self._input_buf)
 
-        # 추론 (execute_v2 — 동기식)
-        self.context.execute_v2(self._bindings)
-
-        # 결과 수신 (동기)
-        _cuda_rt.memcpy_dtoh(self._output_buf, self._d_output)
+        if self._use_async and self._stream is not None:
+            _cuda_rt.memcpy_htod_async(self._d_input, self._input_buf,
+                                       self._stream)
+            if hasattr(self.context, 'execute_async_v3'):
+                self.context.execute_async_v3(self._stream)
+            else:
+                # TRT 8.5 이하: 스트림 동기 후 동기 실행
+                _cuda_rt.stream_synchronize(self._stream)
+                self.context.execute_v2(self._bindings)
+            _cuda_rt.memcpy_dtoh_async(self._output_buf, self._d_output,
+                                       self._stream)
+            _cuda_rt.stream_synchronize(self._stream)
+        else:
+            _cuda_rt.memcpy_htod(self._d_input, self._input_buf)
+            self.context.execute_v2(self._bindings)
+            _cuda_rt.memcpy_dtoh(self._output_buf, self._d_output)
 
         # 후처리
         detections = self._postprocess(self._output_buf, img_w, img_h)
@@ -404,8 +495,22 @@ class YOLOv8Detector:
     def destroy(self):
         """리소스 해제"""
         self._ready = False
+        # CUDA 스트림 해제
+        if self._stream is not None and _cuda_rt is not None:
+            _cuda_rt.stream_destroy(self._stream)
+            self._stream = None
         self.context = None
         self.engine = None
+        # Pinned 호스트 메모리 해제
+        if self._input_pinned_ptr is not None and _cuda_rt is not None:
+            self._input_buf = None
+            _cuda_rt.free_host(self._input_pinned_ptr)
+            self._input_pinned_ptr = None
+        if self._output_pinned_ptr is not None and _cuda_rt is not None:
+            self._output_buf = None
+            _cuda_rt.free_host(self._output_pinned_ptr)
+            self._output_pinned_ptr = None
+        # GPU 메모리 해제
         if self._d_input is not None and _cuda_rt is not None:
             _cuda_rt.free(self._d_input)
             self._d_input = None

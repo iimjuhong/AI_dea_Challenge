@@ -110,6 +110,15 @@ def main():
 
     logger.info(f"서버 시작: http://{args.host}:{args.port}")
     try:
+        from waitress import serve
+        serve(app, host=args.host, port=args.port,
+              threads=8,
+              channel_timeout=120,
+              recv_bytes=65536,
+              send_bytes=262144,
+              log_socket_errors=False)
+    except ImportError:
+        logger.warning("waitress 미설치 — Flask 개발 서버 사용 (pip install waitress 권장)")
         app.run(host=args.host, port=args.port, threaded=True)
     finally:
         camera.stop()
