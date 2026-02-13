@@ -27,15 +27,17 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 - **ROI별 인원 카운팅**: Point-in-Polygon 알고리즘으로 영역별 사람 수 실시간 표시
 - **다중 ROI 지원**: 여러 영역 동시 관리 (입구, 대기 구역, 카운터 등)
 
-### 🚧 Phase 4: 객체 추적 + 칼만필터 (예정)
-- ByteTrack/SORT 기반 객체 추적
-- 칼만필터를 통한 bbox 오차 보정
-- 고유 ID 부여 및 유지
+### ✅ Phase 4: 객체 추적 + 칼만필터 (완료)
+- **ByteTrack 기반 다중 객체 추적**: 2단계 연관 매칭 (고/저신뢰도 분리)
+- **칼만필터 bbox 안정화**: 7차원 상태 벡터, 등속 모델
+- **고유 ID 부여 및 유지**: track_id 단조 증가, 일시적 가림 대응
+- **ROI 체류시간 필터**: 체류 프레임 수 추적으로 오카운팅 방지
 
-### 🚧 Phase 5: 대기시간 측정 및 예측 (예정)
-- ROI 진입/퇴출 이벤트 감지
-- 실제 대기시간 계산
-- 이동 평균 기반 예측 알고리즘
+### ✅ Phase 5: 대기시간 측정 및 예측 (완료)
+- **ROI 진입/퇴출 이벤트 감지**: 상태 전이 기반 실시간 감지
+- **실제 대기시간 계산**: track_id별 ROI 플로우 추적 (진입→퇴출)
+- **하이브리드 예측 알고리즘**: EMA + 대기열 크기 보정 (IQR 이상치 제거)
+- **듀얼 모드 지원**: 단일 ROI / 플로우 모드 선택 가능
 
 ### 🚧 Phase 6: 웹 대시보드 (예정)
 - 실시간 통계 차트 (Chart.js)
@@ -83,10 +85,25 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 └──────────────────────┬──────────────────────────────────────┘
                        ↓
 ┌─────────────────────────────────────────────────────────────┐
+│         ByteTracker (다중 객체 추적)                          │
+│  - 2단계 IoU 매칭 (고/저 신뢰도 분리)                         │
+│  - 칼만필터 bbox 안정화                                       │
+│  - track_id 부여 및 유지                                     │
+└──────────────────────┬──────────────────────────────────────┘
+                       ↓
+┌─────────────────────────────────────────────────────────────┐
+│        WaitTimeEstimator (대기시간 측정/예측)                 │
+│  - ROI 진입/퇴출 이벤트 감지                                  │
+│  - 실제 대기시간 계산                                         │
+│  - 하이브리드 예측 (EMA + 대기열 보정)                        │
+└──────────────────────┬──────────────────────────────────────┘
+                       ↓
+┌─────────────────────────────────────────────────────────────┐
 │              Flask 웹 서버 (0.0.0.0:5000)                    │
 │  - MJPEG 스트리밍 (/video_feed)                             │
 │  - 실시간 통계 API (/api/stats)                              │
 │  - ROI CRUD API (/api/roi)                                 │
+│  - 대기시간 예측 API (/api/wait_time)                        │
 └─────────────────────────────────────────────────────────────┘
                        ↓
               브라우저 (웹 UI)
@@ -118,11 +135,28 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 - 반투명 오버레이 시각화
 ```
 
-#### 4. **Flask 웹 앱** (`src/web/app.py`)
+#### 4. **ByteTracker** (`src/core/tracker.py`)
+```python
+- KalmanBoxTracker: 7차원 칼만필터
+- 2단계 연관 매칭 (고/저신뢰도)
+- track_id 자동 부여
+- ROIDwellFilter: 체류시간 필터링
+```
+
+#### 5. **WaitTimeEstimator** (`src/core/wait_time_estimator.py`)
+```python
+- 상태 전이 기반 이벤트 감지
+- ROI 플로우 추적 (진입→퇴출)
+- HybridPredictor: EMA + 대기열 보정
+- IQR 이상치 필터링
+```
+
+#### 6. **Flask 웹 앱** (`src/web/app.py`)
 ```python
 - MJPEG 스트림 제너레이터
 - RESTful API 엔드포인트
 - ROI 관리 API (CRUD)
+- 대기시간 통계 API
 ```
 
 ---
@@ -184,7 +218,9 @@ aidea/
 │   ├── core/                       # 핵심 로직
 │   │   ├── camera.py              # 카메라 관리자
 │   │   ├── detector.py            # YOLO 검출기
-│   │   └── roi_manager.py         # ROI 관리자
+│   │   ├── roi_manager.py         # ROI 관리자
+│   │   ├── tracker.py             # ByteTrack 추적기
+│   │   └── wait_time_estimator.py # 대기시간 측정/예측
 │   └── web/                       # 웹 인터페이스
 │       ├── app.py                 # Flask 서버
 │       └── templates/
@@ -211,11 +247,10 @@ aidea/
 - **TensorRT**: FP16 엔진, CUDA 메모리 직접 관리
 - **nvjpegenc**: 하드웨어 JPEG 인코딩
 
-### 향후 추가 예정
-- **Kalman Filter**: OpenCV `cv2.KalmanFilter` (bbox 오차 보정)
-- **ByteTrack/SORT**: 객체 추적
+### 추가 예정
 - **boto3/aioboto3**: AWS DynamoDB 연동
 - **Chart.js**: 데이터 시각화
+- **WebSocket**: 실시간 양방향 통신
 
 ---
 
@@ -277,8 +312,8 @@ bash scripts/download_model.sh
 
 - [x] **Phase 1-2**: 카메라 스트리밍 + YOLO 검출
 - [x] **Phase 3**: ROI 관리 시스템
-- [ ] **Phase 4**: 객체 추적 + 칼만필터 오차 보정
-- [ ] **Phase 5**: 대기시간 측정 및 예측
+- [x] **Phase 4**: 객체 추적 + 칼만필터 오차 보정
+- [x] **Phase 5**: 대기시간 측정 및 예측
 - [ ] **Phase 6**: 웹 대시보드 완성
 - [ ] **Phase 7**: DynamoDB 연동
 
