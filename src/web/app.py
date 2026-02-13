@@ -3,6 +3,7 @@ import time
 
 import cv2
 import logging
+import numpy as np
 from flask import Flask, Response, render_template, jsonify, request
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,11 @@ app = Flask(__name__)
 camera = None
 detector = None
 roi_manager = None
+tracker = None
+_dwell_filter = None
 
 _latest_roi_counts = {}
+_latest_tracked = []  # 최신 추적 결과 (API용)
 _inference_thread = None
 
 _TARGET_FPS = 30
@@ -84,12 +88,19 @@ _frame_buf = FrameBuffer()
 # --- init ---
 
 def init_app(camera_manager, detector_instance=None, roi_manager_instance=None,
-             inference_fps=None):
-    """Flask 앱에 카메라/검출기/ROI 매니저 연결 후 Inference 스레드 시작"""
-    global camera, detector, roi_manager, _inference_thread, _TARGET_FPS
+             tracker_instance=None, inference_fps=None, min_dwell_frames=30):
+    """Flask 앱에 카메라/검출기/ROI 매니저/추적기 연결 후 Inference 스레드 시작"""
+    global camera, detector, roi_manager, tracker, _dwell_filter
+    global _inference_thread, _TARGET_FPS
     camera = camera_manager
     detector = detector_instance
     roi_manager = roi_manager_instance
+    tracker = tracker_instance
+
+    if tracker is not None:
+        from src.core.tracker import ROIDwellFilter
+        _dwell_filter = ROIDwellFilter(min_dwell_frames=min_dwell_frames)
+        logger.info(f"ROI 체류 필터 활성화 (min_dwell_frames={min_dwell_frames})")
 
     if inference_fps is not None:
         _TARGET_FPS = inference_fps
@@ -128,21 +139,37 @@ def _inference_loop():
                 time.sleep(0.01)
                 continue
 
-            # --- 검출 (실패 시 원본 프레임으로 계속) ---
+            # --- 검출 + 추적 (실패 시 원본 프레임으로 계속) ---
             detections = []
+            tracked = []
             if detector is not None and detector.is_ready:
                 try:
                     detections = detector.detect(frame)
-                    frame = _annotate_frame(frame, detections)
+
+                    # 추적기 적용: detections → tracked (track_id 포함)
+                    if tracker is not None and detections:
+                        tracked = tracker.update(detections)
+                    elif tracker is not None:
+                        tracked = tracker.update([])
+                    else:
+                        tracked = detections
+
+                    _latest_tracked[:] = tracked
+                    frame = _annotate_frame(frame, tracked)
                     frame = _overlay_fps(frame, detector.get_fps())
                 except Exception as e:
-                    logger.warning(f"검출 오류 (스킵): {e}")
+                    logger.warning(f"검출/추적 오류 (스킵): {e}")
 
-            # --- ROI (실패 시 오버레이 없이 계속) ---
+            # --- ROI (tracked 사용, 실패 시 오버레이 없이 계속) ---
             if roi_manager is not None:
                 try:
-                    if detections:
-                        _latest_roi_counts = roi_manager.count_per_roi(detections)
+                    if tracked:
+                        if _dwell_filter is not None:
+                            # 체류 시간 필터: 잠깐 들어왔다 나가는 사람 제외
+                            roi_dets = roi_manager.filter_detections_by_roi(tracked)
+                            _latest_roi_counts = _dwell_filter.update(roi_dets)
+                        else:
+                            _latest_roi_counts = roi_manager.count_per_roi(tracked)
                     elif detector is not None and detector.is_ready:
                         rois = roi_manager.get_all_rois()
                         _latest_roi_counts = {r["name"]: 0 for r in rois}
@@ -195,17 +222,30 @@ def generate_frames():
 
 # --- Drawing helpers ---
 
-def _annotate_frame(frame, detections):
-    """프레임에 검출 결과 오버레이"""
-    for det in detections:
+def _track_color(track_id):
+    """HSV 기반 트랙별 고유 색상 생성 (BGR 반환)"""
+    hue = (track_id * 37) % 180  # 골든 앵글 근사로 색상 분산
+    hsv = np.array([[[hue, 220, 220]]], dtype=np.uint8)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    return tuple(int(c) for c in bgr[0, 0])
+
+
+def _annotate_frame(frame, tracked):
+    """프레임에 추적 결과 오버레이 (track_id + 고유 색상)"""
+    for det in tracked:
         x1, y1, x2, y2 = det['bbox']
         conf = det['confidence']
-        cls_id = det['class_id']
+        track_id = det.get('track_id')
 
-        color = (0, 255, 0) if cls_id == 0 else (255, 128, 0)
+        if track_id is not None:
+            color = _track_color(track_id)
+            label = f"#{track_id} {conf:.2f}"
+        else:
+            color = (0, 255, 0)
+            label = f"person {conf:.2f}"
+
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        label = f"id:{cls_id} {conf:.2f}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw, y1), color, -1)
         cv2.putText(frame, label, (x1, y1 - 4),
@@ -241,18 +281,34 @@ def video_feed():
 
 @app.route('/api/stats')
 def api_stats():
+    tracker_active = tracker is not None
+    track_ids = tracker.active_track_ids if tracker_active else []
+
     if detector is not None and detector.is_ready:
         return jsonify({
             'fps': detector.get_fps(),
             'person_count': detector.get_detection_count(),
             'detector_active': True,
+            'tracker_active': tracker_active,
+            'track_ids': track_ids,
             'roi_counts': _latest_roi_counts,
         })
     return jsonify({
         'fps': 0,
         'person_count': 0,
         'detector_active': False,
+        'tracker_active': tracker_active,
+        'track_ids': track_ids,
         'roi_counts': _latest_roi_counts,
+    })
+
+
+@app.route('/api/tracks')
+def api_tracks():
+    """현재 활성 추적 결과 반환 (Phase 5 준비)"""
+    return jsonify({
+        'tracks': list(_latest_tracked),
+        'tracker_active': tracker is not None,
     })
 
 

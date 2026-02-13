@@ -7,6 +7,7 @@ import sys
 from src.core.camera import CameraManager
 from src.core.detector import YOLOv8Detector
 from src.core.roi_manager import ROIManager
+from src.core.tracker import ByteTracker
 from src.web.app import app, init_app
 
 logging.basicConfig(
@@ -42,6 +43,12 @@ def parse_args():
                         help='ROI 설정 파일 경로')
     parser.add_argument('--inference-fps', type=int, default=None,
                         help='Inference FPS 제한 (기본값: 카메라 FPS와 동일)')
+    parser.add_argument('--max-age', type=int, default=30,
+                        help='추적기: 미매칭 트랙 유지 프레임 수')
+    parser.add_argument('--min-hits', type=int, default=3,
+                        help='추적기: 출력 최소 매칭 횟수')
+    parser.add_argument('--min-dwell', type=int, default=30,
+                        help='ROI 최소 체류 프레임 수 (기본 30 ≈ 1초@30fps)')
     return parser.parse_args()
 
 
@@ -71,6 +78,14 @@ def main():
             logger.warning("검출기 초기화 실패. 검출 없이 스트리밍만 진행합니다.")
             detector = None
 
+    # 추적기 초기화
+    tracker = ByteTracker(
+        max_age=args.max_age,
+        min_hits=args.min_hits,
+        high_thresh=args.conf_threshold,
+    )
+    logger.info(f"ByteTracker 초기화 (max_age={args.max_age}, min_hits={args.min_hits})")
+
     # ROI 매니저 초기화
     roi_mgr = ROIManager(config_path=args.roi_config)
     roi_mgr.load()
@@ -89,8 +104,9 @@ def main():
         logger.error("카메라 시작 실패. 종료합니다.")
         sys.exit(1)
 
-    init_app(camera, detector, roi_mgr,
-             inference_fps=args.inference_fps or args.fps)
+    init_app(camera, detector, roi_mgr, tracker,
+             inference_fps=args.inference_fps or args.fps,
+             min_dwell_frames=args.min_dwell)
 
     logger.info(f"서버 시작: http://{args.host}:{args.port}")
     try:
