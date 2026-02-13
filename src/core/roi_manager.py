@@ -32,6 +32,7 @@ class ROIManager:
         self._config_path = config_path
         self._rois = []  # list of {"name": str, "points": [[x,y],...], "color": [B,G,R]}
         self._lock = threading.Lock()
+        self._overlay = None  # draw_rois() 오버레이 버퍼 재사용
 
     def load(self) -> bool:
         """JSON 파일에서 ROI 설정을 로드한다."""
@@ -188,13 +189,17 @@ class ROIManager:
         if not rois:
             return frame
 
-        overlay = frame.copy()
+        # 오버레이 버퍼 재사용 (매 프레임 할당 방지)
+        if self._overlay is None or self._overlay.shape != frame.shape:
+            self._overlay = np.empty_like(frame)
+        np.copyto(self._overlay, frame)
+
         for roi in rois:
             pts = np.array(roi["points"], dtype=np.int32)
             color = tuple(roi["color"])
 
             # 반투명 채우기
-            cv2.fillPoly(overlay, [pts], color)
+            cv2.fillPoly(self._overlay, [pts], color)
 
             # 테두리 (불투명)
             cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=2)
@@ -209,7 +214,7 @@ class ROIManager:
             cv2.putText(frame, label, (cx - tw // 2, cy),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+        cv2.addWeighted(self._overlay, alpha, frame, 1 - alpha, 0, frame)
         return frame
 
     @staticmethod

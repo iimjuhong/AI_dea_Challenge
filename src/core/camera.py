@@ -116,22 +116,67 @@ class CameraManager:
         return True
 
     def _capture_loop(self):
-        """백그라운드 프레임 캡처 루프"""
+        """백그라운드 프레임 캡처 루프 (자동 재연결 포함)"""
+        fail_count = 0
+        MAX_FAILS = 30  # 연속 실패 시 카메라 재연결 시도
+
         while self._running:
             ret, frame = self._cap.read()
             if not ret:
-                logger.warning("프레임 읽기 실패")
+                fail_count += 1
+                if fail_count >= MAX_FAILS:
+                    logger.warning(f"프레임 읽기 {fail_count}회 연속 실패 — 카메라 재연결 시도")
+                    self._reconnect()
+                    fail_count = 0
                 time.sleep(0.01)
                 continue
+            fail_count = 0
             with self._lock:
                 self._frame = frame
 
+    def _reconnect(self):
+        """카메라 파이프라인 재연결"""
+        try:
+            if self._cap is not None:
+                self._cap.release()
+                time.sleep(1.0)  # 리소스 해제 대기
+
+            pipeline = self._build_gstreamer_pipeline()
+            self._cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+            if not self._cap.isOpened():
+                logger.warning("CSI 재연결 실패, USB 폴백 시도")
+                self._cap = cv2.VideoCapture(0)
+                if self._cap.isOpened():
+                    self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.display_width)
+                    self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.display_height)
+                    self._cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+            if self._cap.isOpened():
+                logger.info("카메라 재연결 성공")
+            else:
+                logger.error("카메라 재연결 실패 — 3초 후 재시도")
+                time.sleep(3.0)
+        except Exception as e:
+            logger.error(f"카메라 재연결 중 오류: {e}")
+            time.sleep(3.0)
+
     def get_frame(self):
-        """최신 프레임 반환 (thread-safe, BGR numpy array)"""
+        """최신 프레임 반환 (thread-safe, zero-copy 참조 교환)
+
+        프레임 소유권이 호출자에게 이전됩니다.
+        다음 캡처 완료까지 None을 반환하므로
+        동일 프레임의 중복 처리를 방지합니다.
+
+        GStreamer/V4L2 백엔드는 read()마다 새 배열을 생성하므로
+        반환된 프레임이 캡처 루프에 의해 덮어쓰이지 않습니다.
+        """
         with self._lock:
             if self._frame is None:
                 return None
-            return self._frame.copy()
+            frame = self._frame
+            self._frame = None
+            return frame
 
     def get_jpeg_frame(self, quality=80):
         """최신 프레임을 JPEG 바이트로 반환

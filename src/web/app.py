@@ -8,6 +8,14 @@ from flask import Flask, Response, render_template, jsonify, request
 
 logger = logging.getLogger(__name__)
 
+# TurboJPEG: cv2.imencode 대비 2-3x 빠른 JPEG 인코딩 (libjpeg-turbo NEON SIMD)
+try:
+    from turbojpeg import TurboJPEG
+    _turbojpeg = TurboJPEG()
+    logger.info("TurboJPEG 고속 JPEG 인코딩 활성화")
+except (ImportError, RuntimeError, OSError):
+    _turbojpeg = None
+
 app = Flask(__name__)
 
 # ============================================================
@@ -125,6 +133,13 @@ def _inference_loop():
     target_interval = 1.0 / _TARGET_FPS
     error_count = 0
 
+    # 성능 측정 (100프레임마다 로깅)
+    _perf_n = 0
+    _perf_detect = 0.0
+    _perf_jpeg = 0.0
+    _perf_total = 0.0
+    _PERF_LOG_INTERVAL = 100
+
     while True:
         try:
             t0 = time.monotonic()
@@ -178,13 +193,36 @@ def _inference_loop():
                     logger.warning(f"ROI 오류 (스킵): {e}")
 
             # --- JPEG 인코딩 → FrameBuffer (논블로킹) ---
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if ret:
-                _frame_buf.put(buffer.tobytes())
+            t_jpeg = time.monotonic()
+            if _turbojpeg is not None:
+                jpeg_bytes = _turbojpeg.encode(frame, quality=80)
+                _frame_buf.put(jpeg_bytes)
                 error_count = 0
+            else:
+                ret, buffer = cv2.imencode('.jpg', frame,
+                                           [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ret:
+                    _frame_buf.put(buffer.tobytes())
+                    error_count = 0
+            t_jpeg_end = time.monotonic()
+
+            # 성능 측정 로깅
+            elapsed = t_jpeg_end - t0
+            _perf_n += 1
+            _perf_jpeg += (t_jpeg_end - t_jpeg)
+            _perf_total += elapsed
+            if _perf_n >= _PERF_LOG_INTERVAL:
+                avg_jpeg = _perf_jpeg / _perf_n * 1000
+                avg_total = _perf_total / _perf_n * 1000
+                enc = "TurboJPEG" if _turbojpeg else "cv2.imencode"
+                logger.info(
+                    f"[Perf/{_perf_n}f] jpeg({enc})={avg_jpeg:.1f}ms "
+                    f"total={avg_total:.1f}ms ({1000/avg_total:.1f}fps)")
+                _perf_n = 0
+                _perf_jpeg = 0.0
+                _perf_total = 0.0
 
             # FPS 조절 — 최소 1ms sleep으로 GIL 양보 보장
-            elapsed = time.monotonic() - t0
             sleep_time = max(target_interval - elapsed, 0.001)
             time.sleep(sleep_time)
 
@@ -202,21 +240,32 @@ def generate_frames():
     - Inference 스레드와 완전 독립
     - 느린 클라이언트는 프레임을 건너뜀 (frame_id 추적)
     - 와이파이 끊김 → 이 generator만 멈춤, Inference는 계속 동작
+    - 클라이언트 끊김 시 안전하게 종료
     """
     last_id = 0
     frame_timeout = max(1.0 / _TARGET_FPS * 3, 0.5)  # 3프레임 대기, 최소 0.5초
+    empty_count = 0
+    MAX_EMPTY = 60  # 60회 연속 빈 프레임이면 스트림 종료 (클라이언트 버퍼 절약)
+
     try:
         while True:
             jpeg, last_id = _frame_buf.get(prev_id=last_id, timeout=frame_timeout)
             if jpeg is None:
-                # 타임아웃 — 아직 프레임 없음, 재시도
+                empty_count += 1
+                if empty_count >= MAX_EMPTY:
+                    logger.warning("MJPEG: 프레임 없음 타임아웃, 스트림 종료")
+                    return
                 continue
+            empty_count = 0
 
             yield (
                 b'--frame\r\n'
                 b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n'
             )
     except GeneratorExit:
+        return
+    except Exception as e:
+        logger.debug(f"MJPEG 스트림 종료: {e}")
         return
 
 
@@ -246,10 +295,10 @@ def _annotate_frame(frame, tracked):
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw, y1), color, -1)
-        cv2.putText(frame, label, (x1, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+        cv2.putText(frame, label, (x1 + 2, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
     return frame
 
