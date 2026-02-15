@@ -1,57 +1,219 @@
-# 식당 대기시간 추정 시스템
+# 식당 대기시간 추정 시스템 (HY-eat)
 
 NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대기시간 추정 시스템
 
+> **최신 업데이트**: Phase 6 DynamoDB 통합 완료 (2026-02-15)
+
+---
+
+## 📋 목차
+
+1. [프로젝트 개요](#프로젝트-개요)
+2. [현재 구현 상태](#-현재-구현-상태)
+3. [시스템 아키텍처](#-시스템-아키텍처)
+4. [빠른 시작](#-빠른-시작)
+5. [상세 설정 가이드](#-상세-설정-가이드)
+6. [API 문서](#-api-문서)
+7. [프로젝트 구조](#-프로젝트-구조)
+8. [기술 스택](#-기술-스택)
+9. [성능 지표](#-성능-지표)
+10. [문제 해결](#-문제-해결)
+11. [개발 로드맵](#-개발-로드맵)
+
+---
+
 ## 프로젝트 개요
 
-- **목표**: 객체 추적 기반 실제 대기시간 측정 및 예측
-- **디바이스**: NVIDIA Jetson Orin Super Nano (16GB)
-- **카메라**: Arducam IMX219 (CSI)
-- **OS**: Ubuntu 22.04 (JetPack 6.2.2)
+**HY-eat**는 한양대학교 학생식당의 실시간 대기시간을 측정하고 예측하는 AI 기반 시스템입니다.
+
+### 핵심 목표
+
+- 📊 **실시간 대기시간 측정**: 객체 추적 기반 정확한 대기시간 계산
+- 🔮 **예측 알고리즘**: 머신러닝 기반 대기시간 예측
+- ☁️ **클라우드 연동**: AWS DynamoDB를 통한 데이터 영속화 및 웹 서비스 제공
+- ⚡ **엣지 컴퓨팅**: Jetson Nano에서 실시간 처리 (저지연)
+
+### 하드웨어 사양
+
+| 항목 | 사양 |
+|------|------|
+| **디바이스** | NVIDIA Jetson Orin Super Nano (16GB) |
+| **카메라** | Arducam IMX219 (CSI, 1280×720 @ 30fps) |
+| **OS** | Ubuntu 22.04 (JetPack 6.2.2) |
+| **추론 엔진** | TensorRT 8.x (FP16) |
 
 ---
 
 ## ✨ 현재 구현 상태
 
 ### ✅ Phase 1-2: 카메라 스트리밍 + YOLO 검출 (완료)
-- **실시간 카메라 스트리밍**: GStreamer 파이프라인을 통한 CSI 카메라 영상 캡처
-- **YOLO 객체 검출**: TensorRT 기반 YOLOv8 FP16 추론 (15-20 FPS)
-- **사람 검출 및 시각화**: Bounding box 오버레이 및 신뢰도 표시
-- **웹 인터페이스**: Flask 기반 MJPEG 스트리밍
+
+<details>
+<summary>세부 구현 내용 보기</summary>
+
+- **실시간 카메라 스트리밍**
+  - GStreamer 파이프라인 (`nvarguscamerasrc`)
+  - 하드웨어 가속 영상 처리 (`nvvidconv`)
+  - Zero-copy 메모리 관리
+  
+- **YOLO 객체 검출**
+  - YOLOv8n TensorRT 최적화 (FP16)
+  - 실시간 추론: 15-20 FPS
+  - Person 클래스만 검출 (class_id=0)
+  
+- **웹 인터페이스**
+  - Flask MJPEG 스트리밍
+  - TurboJPEG 고속 인코딩 (2-3배 빠름)
+  - 논블로킹 프레임 버퍼
+
+</details>
+
+---
 
 ### ✅ Phase 3: ROI 관리 시스템 (완료)
-- **웹 기반 ROI 설정**: 브라우저에서 마우스로 다각형 영역 그리기
+
+<details>
+<summary>세부 구현 내용 보기</summary>
+
+- **웹 기반 ROI 설정**
+  - 마우스 클릭으로 다각형 영역 그리기
   - 좌클릭: 꼭짓점 추가
   - 우클릭: 완성
-- **JSON 설정 저장/불러오기**: `config/roi_config.json`에 영구 저장
-- **ROI별 인원 카운팅**: Point-in-Polygon 알고리즘으로 영역별 사람 수 실시간 표시
-- **다중 ROI 지원**: 여러 영역 동시 관리 (입구, 대기 구역, 카운터 등)
+  
+- **데이터 영속화**
+  - JSON 형식으로 `config/roi_config.json`에 저장
+  - 서버 재시작 시 자동 로드
+  
+- **실시간 카운팅**
+  - Point-in-Polygon 알고리즘
+  - 다중 ROI 동시 지원
+  - 반투명 오버레이 시각화
+
+</details>
+
+---
 
 ### ✅ Phase 4: 객체 추적 + 칼만필터 (완료)
-- **ByteTrack 기반 다중 객체 추적**: 2단계 연관 매칭 (고/저신뢰도 분리)
-- **칼만필터 bbox 안정화**: 7차원 상태 벡터, 등속 모델
-- **고유 ID 부여 및 유지**: track_id 단조 증가, 일시적 가림 대응
-- **ROI 체류시간 필터**: 체류 프레임 수 추적으로 오카운팅 방지
+
+<details>
+<summary>세부 구현 내용 보기</summary>
+
+- **ByteTrack 다중 객체 추적**
+  - 2단계 IoU 매칭 (고/저 신뢰도 분리)
+  - 일시적 가림 대응 (occlusion handling)
+  - 고유 track_id 부여 및 유지
+  
+- **칼만필터 안정화**
+  - 7차원 상태 벡터: [x, y, w, h, vx, vy, vw]
+  - 등속 모델 (constant velocity)
+  - Bbox 지터링 제거
+  
+- **ROI 체류시간 필터**
+  - 최소 체류 프레임 수 설정 (기본 30 프레임 ≈ 1초)
+  - 오카운팅 방지 (잠깐 들어왔다 나가는 경우 제외)
+
+</details>
+
+---
 
 ### ✅ Phase 5: 대기시간 측정 및 예측 (완료)
-- **ROI 진입/퇴출 이벤트 감지**: 상태 전이 기반 실시간 감지
-- **실제 대기시간 계산**: track_id별 ROI 플로우 추적 (진입→퇴출)
-- **하이브리드 예측 알고리즘**: EMA + 대기열 크기 보정 (IQR 이상치 제거)
-- **듀얼 모드 지원**: 단일 ROI / 플로우 모드 선택 가능
 
-### 🚧 Phase 6: 웹 대시보드 (예정)
+<details>
+<summary>세부 구현 내용 보기</summary>
+
+- **ROI 이벤트 감지**
+  - 상태 전이 기반 진입/퇴출 감지
+  - track_id별 ROI 플로우 추적
+  
+- **대기시간 계산**
+  - 진입 시각 → 퇴출 시각 차이 계산
+  - 듀얼 모드 지원:
+    - **단일 ROI**: start_roi 체류시간 = 대기시간
+    - **플로우 모드**: start_roi 진입 → end_roi 진입
+  
+- **하이브리드 예측 알고리즘**
+  - **EMA (Exponential Moving Average)**: 과거 트렌드 반영
+  - **대기열 크기 보정**: 현재 대기 인원 수 고려
+  - **IQR 이상치 필터링**: 비정상 샘플 자동 제거
+  - **Stale 트랙 정리**: 300초 초과 시 자동 삭제
+
+</details>
+
+---
+
+### ✅ Phase 6: AWS DynamoDB 연동 (완료) 🎉
+
+<details>
+<summary>세부 구현 내용 보기</summary>
+
+- **비동기 배치 전송**
+  - boto3 기반 DynamoDB 클라이언트
+  - 최대 25개 아이템 배치 쓰기
+  - 백그라운드 워커 스레드 (논블로킹)
+  
+- **데이터 변환 파이프라인**
+  - Python snake_case → DynamoDB camelCase 자동 변환
+  - PK/SK 자동 생성: `CORNER#{restaurant_id}#{corner_id}` / `{timestamp}`
+  - ISO 8601 타임스탬프 (KST, +09:00)
+  - TTL 자동 설정 (30일 후 자동 삭제)
+  
+- **전송 전략**
+  - 주기적 전송: 10초마다 자동 전송
+  - 값 변경 감지: 대기시간 변경 시 즉시 전송 (최소 2초 간격)
+  - Exponential backoff 재시도
+  - 전송 실패 시 큐에 재적재
+  
+- **모니터링**
+  - `/api/dynamodb/stats` 엔드포인트
+  - 전송 성공/실패 카운트
+  - 대기 중인 아이템 수
+
+**데이터 형식**:
+
+**Jetson 전송 (snake_case)**:
+```json
+{
+  "restaurant_id": "hanyang_plaza",
+  "corner_id": "korean",
+  "queue_count": 15,
+  "est_wait_time_min": 8,
+  "timestamp": 1770349800000
+}
+```
+
+**DynamoDB 저장 (camelCase)**:
+```json
+{
+  "pk": "CORNER#hanyang_plaza#korean",
+  "sk": "1770349800000",
+  "restaurantId": "hanyang_plaza",
+  "cornerId": "korean",
+  "queueLen": 15,
+  "estWaitTimeMin": 8,
+  "dataType": "observed",
+  "source": "jetson_nano",
+  "timestampIso": "2026-02-15T17:00:00+09:00",
+  "createdAtIso": "2026-02-15T17:00:01+09:00",
+  "ttl": 1772941800
+}
+```
+
+</details>
+
+---
+
+### 🚧 Phase 7: 웹 대시보드 (예정)
+
 - 실시간 통계 차트 (Chart.js)
 - 시간대별 분석
-
-### 🚧 Phase 7: DynamoDB 연동 (예정)
-- AWS DynamoDB 데이터 영속화
-- 비동기 배치 쓰기 (boto3/aioboto3)
+- 코너별 대기 현황
 
 ---
 
 ## 🏗️ 시스템 아키텍처
 
-### 전체 파이프라인
+### 전체 파이프라인 (End-to-End)
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    CSI 카메라 (IMX219)                       │
@@ -98,16 +260,54 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 │  - 하이브리드 예측 (EMA + 대기열 보정)                        │
 └──────────────────────┬──────────────────────────────────────┘
                        ↓
-┌─────────────────────────────────────────────────────────────┐
-│              Flask 웹 서버 (0.0.0.0:5000)                    │
-│  - MJPEG 스트리밍 (/video_feed)                             │
-│  - 실시간 통계 API (/api/stats)                              │
-│  - ROI CRUD API (/api/roi)                                 │
-│  - 대기시간 예측 API (/api/wait_time)                        │
-└─────────────────────────────────────────────────────────────┘
-                       ↓
-              브라우저 (웹 UI)
+         ┌─────────────┴─────────────┐
+         ↓                           ↓
+┌──────────────────┐      ┌──────────────────────────┐
+│  Flask 웹 서버    │      │  DynamoDBSender          │
+│  (0.0.0.0:5000)  │      │  (백그라운드 워커)        │
+│                  │      │  - 비동기 배치 전송       │
+│  - MJPEG 스트림  │      │  - snake→camel 변환      │
+│  - API 엔드포인트 │      │  - PK/SK 생성           │
+│  - ROI CRUD      │      │  - TTL 설정             │
+└────────┬─────────┘      └──────────┬───────────────┘
+         ↓                           ↓
+   브라우저 (웹 UI)       AWS DynamoDB (hyeat-waiting-data)
+                                     ↓
+                            웹 대시보드 (Phase 7 예정)
 ```
+
+---
+
+### 3-Thread 아키텍처 (성능 최적화)
+
+```
+Thread 1 (Camera):
+  └→ CameraManager._capture_loop
+     └→ GStreamer에서 프레임 캡처
+        └→ _frame에 저장 (thread-safe)
+
+Thread 2 (Inference):
+  └→ _inference_loop
+     └→ get_frame() → YOLO → ByteTracker → ROI
+        └→ WaitTimeEstimator.update()
+           └→ DynamoDBSender.send() (10초마다 or 변경 시)
+              └→ JPEG 인코딩 → FrameBuffer.put()
+
+Thread 3 (Network/Flask):
+  └→ generate_frames()
+     └→ FrameBuffer.get() → yield MJPEG
+        └→ 느린 클라이언트는 프레임 스킵 (최신만 수신)
+
+Thread 4 (DynamoDB Worker):
+  └→ DynamoDBSender._worker_loop
+     └→ 큐에서 배치 꺼내기 (최대 25개)
+        └→ batch_write_item (재시도 포함)
+```
+
+**핵심 설계 원칙**:
+- ✅ **비블로킹**: 각 스레드는 완전히 독립적
+- ✅ **느린 소비자 무시**: 네트워크 지연이 inference에 영향 없음
+- ✅ **Graceful Degradation**: DynamoDB 오류 시 시스템 계속 동작
 
 ### 주요 컴포넌트
 
@@ -161,48 +361,435 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 
 ---
 
-## 🚀 사용 방법
+## 🚀 빠른 시작
 
-### 1. 프로그램 실행
+### 전제 조건
+
+- ✅ NVIDIA Jetson Orin Super Nano (JetPack 6.2.2)
+- ✅ Python 3.10+
+- ✅ TensorRT 8.x
+- ✅ GStreamer (NVIDIA 플러그인 포함)
+
+### 기본 실행 (DynamoDB 없이)
+
 ```bash
+# 1. 프로젝트 클론
 cd /home/iimjuhong/projects/aidea
+
+# 2. 의존성 설치
+pip3 install -r requirements.txt
+
+# 3. YOLO 모델 다운로드 (최초 1회)
+bash scripts/download_model.sh
+
+# 4. 프로그램 실행
 python3 main.py
+
+# 5. 웹 UI 접속
+# http://localhost:5000
 ```
 
-**옵션:**
+### DynamoDB 연동 실행
+
 ```bash
-# 해상도 변경
-python3 main.py --display-width 1280 --display-height 720
+# 1. AWS 자격증명 설정 (.env 파일 또는 환경 변수)
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
 
-# FPS 변경
-python3 main.py --fps 30
+# 2. DynamoDB 설정 파일 수정
+nano config/aws_config.json
 
-# 모델 경로 지정
-python3 main.py --model models/yolov8n.onnx
+# 3. 대기시간 추정 활성화 (start-roi 필수)
+python3 main.py --start-roi "대기구역" --end-roi "카운터"
 
-# 신뢰도 임계값 조정
-python3 main.py --conf-threshold 0.6
+# 4. DynamoDB 전송 확인
+curl http://localhost:5000/api/dynamodb/stats
+```
 
-# 모든 옵션 보기
+---
+
+## 📖 상세 설정 가이드
+
+### 1️⃣ ROI (Region of Interest) 설정
+
+대기시간 측정을 위해 ROI 영역을 설정해야 합니다.
+
+#### 웹 UI에서 ROI 그리기
+
+1. **웹 UI 접속**: `http://localhost:5000`
+2. **ROI 이름 입력**: 예) "대기구역", "카운터"
+3. **그리기 시작 클릭**
+4. **마우스로 영역 지정**:
+   - 좌클릭: 꼭짓점 추가 (최소 3개)
+   - 우클릭: 완성
+5. **저장 확인**: `config/roi_config.json` 자동 저장
+
+#### ROI 설정 파일 (`config/roi_config.json`)
+
+```json
+{
+  "rois": [
+    {
+      "name": "대기구역",
+      "points": [[100, 200], [300, 200], [300, 400], [100, 400]],
+      "color": [0, 255, 0]
+    },
+    {
+      "name": "카운터",
+      "points": [[400, 200], [600, 200], [600, 400], [400, 400]],
+      "color": [255, 0, 0]
+    }
+  ]
+}
+```
+
+---
+
+### 2️⃣ AWS DynamoDB 설정
+
+#### DynamoDB 테이블 생성
+
+**AWS CLI 사용**:
+```bash
+aws dynamodb create-table \
+  --table-name hyeat-waiting-data \
+  --attribute-definitions \
+    AttributeName=pk,AttributeType=S \
+    AttributeName=sk,AttributeType=S \
+  --key-schema \
+    AttributeName=pk,KeyType=HASH \
+    AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --region ap-northeast-2
+```
+
+**AWS 콘솔 사용**:
+1. DynamoDB 콘솔 접속
+2. "Create table" 클릭
+3. 설정:
+   - **Table name**: `hyeat-waiting-data`
+   - **Partition key**: `pk` (String)
+   - **Sort key**: `sk` (String)
+   - **Billing mode**: On-demand
+
+#### TTL 설정 (자동 삭제)
+
+```bash
+aws dynamodb update-time-to-live \
+  --table-name hyeat-waiting-data \
+  --time-to-live-specification \
+    "Enabled=true, AttributeName=ttl" \
+  --region ap-northeast-2
+```
+
+#### AWS 설정 파일 (`config/aws_config.json`)
+
+```json
+{
+  "region": "ap-northeast-2",
+  "table_name": "hyeat-waiting-data",
+  "restaurant_id": "hanyang_plaza",
+  "corner_id": "korean"
+}
+```
+
+**필수 필드**:
+- `region`: AWS 리전 (예: `ap-northeast-2`)
+- `table_name`: DynamoDB 테이블 이름
+
+**선택 필드**:
+- `restaurant_id`: 식당 ID (기본값: "unknown")
+- `corner_id`: 코너 ID (기본값: "unknown")
+
+#### AWS 자격증명 설정
+
+**방법 1: 환경 변수** (권장)
+```bash
+# ~/.bashrc 또는 ~/.profile에 추가
+export AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"
+export AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+```
+
+**방법 2: AWS CLI 설정**
+```bash
+aws configure
+# AWS Access Key ID: [your-key]
+# AWS Secret Access Key: [your-secret]
+# Default region name: ap-northeast-2
+# Default output format: json
+```
+
+**보안 주의사항**:
+- ⚠️ **절대 코드에 하드코딩하지 마세요**
+- ✅ 환경 변수 또는 AWS IAM Role 사용
+- ✅ `.gitignore`에 자격증명 파일 추가
+
+---
+
+### 3️⃣ 대기시간 추정 설정
+
+#### 옵션 설명
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--start-roi` | 대기 시작 ROI 이름 (필수) | None |
+| `--end-roi` | 대기 종료 ROI 이름 (선택) | None |
+| `--min-dwell` | 최소 체류 프레임 수 | 30 (≈1초@30fps) |
+
+#### 실행 예시
+
+**단일 ROI 모드** (체류시간 = 대기시간):
+```bash
+python3 main.py --start-roi "대기구역"
+```
+
+**플로우 모드** (진입→퇴출):
+```bash
+python3 main.py --start-roi "대기구역" --end-roi "카운터"
+```
+
+**DynamoDB 비활성화**:
+```bash
+python3 main.py --start-roi "대기구역" --no-dynamodb
+```
+
+---
+
+### 4️⃣ 고급 옵션
+
+```bash
+python3 main.py \
+  --capture-width 1280 \
+  --capture-height 720 \
+  --display-width 640 \
+  --display-height 480 \
+  --fps 30 \
+  --conf-threshold 0.5 \
+  --model models/yolov8n.onnx \
+  --start-roi "대기구역" \
+  --end-roi "카운터" \
+  --min-dwell 30 \
+  --aws-config config/aws_config.json
+```
+
+**전체 옵션 보기**:
+```bash
 python3 main.py --help
 ```
 
-### 2. 웹 UI 접속
-브라우저에서 다음 주소로 접속:
-- `http://localhost:5000` (같은 기기)
-- `http://[Jetson IP]:5000` (네트워크 접속)
-
-### 3. ROI 영역 설정
-1. **ROI 이름 입력** (예: "대기구역")
-2. **"그리기 시작" 클릭**
-3. **좌클릭**으로 꼭짓점 추가 (최소 3개)
-4. **우클릭**으로 완성
-5. ROI 목록에서 영역별 실시간 인원 수 확인
-
-### 4. 종료
-터미널에서 `Ctrl + C`
 
 ---
+
+## 📡 API 문서
+
+모든 API는 `http://localhost:5000` 또는 `http://[Jetson IP]:5000`에서 접근할 수 있습니다.
+
+### 스트리밍 엔드포인트
+
+#### `GET /video_feed`
+
+MJPEG 실시간 비디오 스트리밍
+
+**응답**: `multipart/x-mixed-replace; boundary=frame`
+
+**사용 예시**:
+```html
+<img src="http://localhost:5000/video_feed" />
+```
+
+---
+
+### 통계 API
+
+#### `GET /api/stats`
+
+실시간 검출 및 추적 통계
+
+**응답 예시**:
+```json
+{
+  "fps": 18.5,
+  "person_count": 12,
+  "detector_active": true,
+  "tracker_active": true,
+  "track_ids": [1, 2, 3, 5, 7],
+  "roi_counts": {
+    "대기구역": 8,
+    "카운터": 4
+  }
+}
+```
+
+#### `GET /api/tracks`
+
+현재 활성 추적 객체 목록
+
+**응답 예시**:
+```json
+{
+  "tracker_active": true,
+  "tracks": [
+    {
+      "bbox": [120, 200, 180, 350],
+      "confidence": 0.87,
+      "track_id": 1
+    },
+    {
+      "bbox": [250, 180, 310, 340],
+      "confidence": 0.92,
+      "track_id": 2
+    }
+  ]
+}
+```
+
+---
+
+### ROI 관리 API
+
+#### `GET /api/roi`
+
+모든 ROI 목록 조회
+
+**응답 예시**:
+```json
+{
+  "rois": [
+    {
+      "name": "대기구역",
+      "points": [[100, 200], [300, 200], [300, 400], [100, 400]],
+      "color": [0, 255, 0]
+    }
+  ]
+}
+```
+
+#### `POST /api/roi`
+
+새 ROI 추가
+
+**요청 본문**:
+```json
+{
+  "name": "대기구역",
+  "points": [[100, 200], [300, 200], [300, 400], [100, 400]],
+  "color": [0, 255, 0]
+}
+```
+
+**응답**: `200 OK` (성공) / `409 Conflict` (이름 중복)
+
+#### `PUT /api/roi/<name>`
+
+기존 ROI 수정
+
+**요청 본문**:
+```json
+{
+  "points": [[110, 210], [310, 210], [310, 410], [110, 410]],
+  "new_name": "대기구역_수정",
+  "color": [0, 200, 0]
+}
+```
+
+**응답**: `200 OK` (성공) / `404 Not Found` (없는 ROI)
+
+#### `DELETE /api/roi/<name>`
+
+ROI 삭제
+
+**응답**: `200 OK` (성공) / `404 Not Found` (없는 ROI)
+
+#### `GET /api/roi/stats`
+
+ROI별 현재 인원 수
+
+**응답 예시**:
+```json
+{
+  "roi_counts": {
+    "대기구역": 8,
+    "카운터": 4
+  }
+}
+```
+
+---
+
+### 대기시간 API
+
+#### `GET /api/wait_time`
+
+현재 대기시간 예측 및 대기열 정보
+
+**응답 예시**:
+```json
+{
+  "predicted_wait": 480.5,
+  "current_queue": 8,
+  "total_completed": 127,
+  "active_waiters": {
+    "1": 120.3,
+    "2": 85.7,
+    "5": 230.1
+  },
+  "statistics": {
+    "total_samples": 127,
+    "mean": 465.2,
+    "min": 180.5,
+    "max": 720.8,
+    "recent_10_avg": 485.3
+  }
+}
+```
+
+**필드 설명**:
+- `predicted_wait`: 예상 대기시간 (초)
+- `current_queue`: 현재 대기 중인 인원 수
+- `total_completed`: 완료된 대기시간 샘플 수
+- `active_waiters`: track_id별 현재 대기 시간 (초)
+- `statistics`: 통계 정보 (평균, 최소/최대, 최근 10개 평균)
+
+---
+
+### DynamoDB 관리 API
+
+#### `GET /api/dynamodb/stats`
+
+DynamoDB 전송 통계
+
+**응답 예시**:
+```json
+{
+  "sent": 1523,
+  "errors": 2,
+  "pending": 0
+}
+```
+
+**필드 설명**:
+- `sent`: 전송 성공 카운트
+- `errors`: 전송 실패 카운트
+- `pending`: 대기 중인 아이템 수
+
+---
+
+### 헬스체크 API
+
+#### `GET /health`
+
+시스템 상태 확인
+
+**응답 예시**:
+```json
+{
+  "status": "ok",
+  "camera": true,
+  "detector": true
+}
+```
+
+
 
 ## 📂 프로젝트 구조
 
@@ -210,11 +797,18 @@ python3 main.py --help
 aidea/
 ├── main.py                          # 메인 진입점
 ├── config/
+│   ├── aws_config.json             # AWS DynamoDB 설정 (Phase 6) 🆕
 │   └── roi_config.json             # ROI 설정 저장
+├── frontend/                        # 프론트엔드 타입 정의 (Phase 7) 🆕
+│   └── src/
+│       └── types/
+│           └── hyeat.ts            # TypeScript 인터페이스
 ├── models/
 │   ├── yolov8n.onnx                # YOLO 모델
 │   └── yolov8n_fp16.engine         # TensorRT 엔진 캐시
 ├── src/
+│   ├── cloud/                       # 클라우드 연동 (Phase 6) 🆕
+│   │   └── dynamodb_sender.py      # DynamoDB 전송 모듈
 │   ├── core/                       # 핵심 로직
 │   │   ├── camera.py              # 카메라 관리자
 │   │   ├── detector.py            # YOLO 검출기
@@ -228,7 +822,9 @@ aidea/
 ├── scripts/
 │   ├── download_model.sh          # 모델 다운로드
 │   └── setup_env.sh               # 환경 설정
-└── requirements.txt               # Python 의존성
+├── requirements.txt               # Python 의존성
+└── docs/
+    └── Phase5_대기시간_알고리즘_가이드.md  # 개발 가이드
 ```
 
 ---
@@ -241,16 +837,23 @@ aidea/
 - **YOLOv8** (Ultralytics ONNX)
 - **TensorRT** (FP16 추론)
 - **Flask** (웹 서버)
+- **boto3** 🆕 (AWS SDK for Python)
 
 ### 하드웨어 최적화
 - **GStreamer**: nvarguscamerasrc, nvvidconv
 - **TensorRT**: FP16 엔진, CUDA 메모리 직접 관리
 - **nvjpegenc**: 하드웨어 JPEG 인코딩
+- **TurboJPEG**: NEON SIMD 가속 JPEG 인코딩
 
-### 추가 예정
-- **boto3/aioboto3**: AWS DynamoDB 연동
+### 클라우드 (Phase 6) 🆕
+- **AWS DynamoDB**: NoSQL 데이터베이스
+- **boto3**: 비동기 배치 쓰기
+- **IAM**: 자격증명 및 권한 관리
+
+### 프론트엔드 (Phase 7 예정)
 - **Chart.js**: 데이터 시각화
 - **WebSocket**: 실시간 양방향 통신
+- **TypeScript**: 타입 안전성
 
 ---
 
@@ -306,16 +909,203 @@ pip3 install -r requirements.txt
 bash scripts/download_model.sh
 ```
 
+
+---
+
+## 🔧 문제 해결
+
+### 카메라 연결 오류
+
+**증상**: `카메라 시작 실패. 종료합니다.`
+
+**해결 방법**:
+```bash
+# 카메라 장치 확인
+ls -l /dev/video*
+
+# GStreamer 파이프라인 테스트
+gst-launch-1.0 nvarguscamerasrc ! nvvidconv ! fakesink
+
+# 권한 문제 해결
+sudo usermod -aG video $USER
+sudo reboot
+```
+
+---
+
+### TensorRT 엔진 빌드 실패
+
+**증상**: `TensorRT 엔진 빌드 실패`
+
+**해결 방법**:
+```bash
+# TensorRT 버전 확인
+dpkg -l | grep TensorRT
+
+# CUDA 경로 확인
+echo $LD_LIBRARY_PATH
+
+# 기존 엔진 파일 삭제 후 재생성
+rm models/yolov8n_fp16.engine
+python3 main.py
+```
+
+---
+
+### DynamoDB 연결 오류
+
+**증상**: `DynamoDB 클라이언트 초기화 실패`
+
+**원인 1**: AWS 자격증명 없음
+```bash
+# 환경 변수 확인
+echo $AWS_ACCESS_KEY_ID
+echo $AWS_SECRET_ACCESS_KEY
+
+# 설정 후 재실행
+export AWS_ACCESS_KEY_ID="your-key"
+export AWS_SECRET_ACCESS_KEY="your-secret"
+```
+
+**원인 2**: 네트워크 연결 문제
+```bash
+# 인터넷 연결 확인
+ping aws.amazon.com
+
+# DynamoDB 엔드포인트 접근 테스트
+curl https://dynamodb.ap-northeast-2.amazonaws.com
+```
+
+**원인 3**: 테이블 없음
+```bash
+# 테이블 존재 확인
+aws dynamodb describe-table --table-name hyeat-waiting-data --region ap-northeast-2
+
+# 테이블 생성 (상세 설정 가이드 참조)
+```
+
+---
+
+### DynamoDB 전송 모니터링
+
+```bash
+# 전송 통계 실시간 확인
+watch -n 1 'curl -s http://localhost:5000/api/dynamodb/stats | python3 -m json.tool'
+
+# 로그 확인
+tail -f logs/aidea.log | grep DynamoDB
+```
+
+---
+
+### 메모리 부족 오류
+
+**증상**: Out of Memory (OOM)
+
+**해결 방법**:
+```bash
+# 스왑 메모리 확인
+free -h
+
+# 스왑 메모리 추가 (8GB)
+sudo fallocate -l 8G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+# 영구 적용
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+---
+
+### 성능 저하
+
+**증상**: FPS가 10 이하로 떨어짐
+
+**원인 및 해결**:
+
+1. **과도한 ROI 수**:
+   ```bash
+   # ROI 개수 확인
+   cat config/roi_config.json | jq '.rois | length'
+   
+   # 권장: 5개 이하
+   ```
+
+2. **높은 해상도**:
+   ```bash
+   # 해상도 낮추기
+   python3 main.py --display-width 640 --display-height 480
+   ```
+
+3. **DynamoDB 전송 병목**:
+   ```bash
+   # DynamoDB 비활성화 테스트
+   python3 main.py --no-dynamodb --start-roi "대기구역"
+   ```
+
+---
+
+### ROI 설정이 저장되지 않음
+
+**증상**: 재실행 시 ROI가 사라짐
+
+**해결 방법**:
+```bash
+# config 디렉토리 권한 확인
+ls -ld config/
+
+# 권한 부여
+chmod 755 config/
+chmod 644 config/roi_config.json
+
+# JSON 형식 검증
+cat config/roi_config.json | python3 -m json.tool
+```
+
 ---
 
 ## 📝 개발 로드맵
 
-- [x] **Phase 1-2**: 카메라 스트리밍 + YOLO 검출
-- [x] **Phase 3**: ROI 관리 시스템
-- [x] **Phase 4**: 객체 추적 + 칼만필터 오차 보정
-- [x] **Phase 5**: 대기시간 측정 및 예측
-- [ ] **Phase 6**: 웹 대시보드 완성
-- [ ] **Phase 7**: DynamoDB 연동
+- [x] **Phase 1-2**: 카메라 스트리밍 + YOLO 검출 ✅
+- [x] **Phase 3**: ROI 관리 시스템 ✅
+- [x] **Phase 4**: 객체 추적 + 칼만필터 오차 보정 ✅
+- [x] **Phase 5**: 대기시간 측정 및 예측 ✅
+- [x] **Phase 6**: AWS DynamoDB 연동 ✅ 🎉
+- [ ] **Phase 7**: 웹 대시보드 완성 🚧
+  - [ ] Chart.js 실시간 차트
+  - [ ] 시간대별 통계 분석
+  - [ ] 코너별 대기 현황
+  - [ ] 히스토리 데이터 시각화
+
+---
+
+## 💡 주요 특징
+
+### 🚀 성능
+- **15-20 FPS**: TensorRT FP16 최적화
+- **\u003c100ms 지연**: 카메라 → 웹 UI
+- **~2GB 메모리**: 효율적인 메모리 관리
+- **논블로킹**: 4-스레드 아키텍처로 완전 비동기 처리
+
+### 🎯 정확도
+- **ByteTrack**: 고성능 다중 객체 추적
+- **칼만필터**: Bbox 안정화
+- **하이브리드 예측**: EMA + 대기열 보정 + IQR 이상치 제거
+- **ROI 체류 필터**: 오카운팅 방지
+
+### ☁️ 클라우드 연동 (Phase 6) 🆕
+- **비동기 배치 전송**: 최대 25개 아이템
+- **자동 재시도**: Exponential backoff
+- **데이터 변환**: snake_case ↔ camelCase
+- **TTL 자동 설정**: 30일 후 자동 삭제
+
+### 🛡️ 안정성
+- **Graceful Degradation**: DynamoDB 오류 시에도 시스템 정상 동작
+- **스레드 안전**: 모든 공유 자원은 Lock으로 보호
+- **에러 복구**: 자동 재시도 및 큐 재적재
+- **모니터링**: 전송 통계 API 제공
 
 ---
 
