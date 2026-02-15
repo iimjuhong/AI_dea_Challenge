@@ -1,6 +1,6 @@
 {
     "region": "ap-northeast-2",
-    "table_name": "hyeat_YOLO_data",
+    "table_name": "hyeat-waiting-data-dev",
     "restaurant_id": "hanyang_plaza",
-    "corner_id": "korean"
+    "corner_id": "western"
 }
