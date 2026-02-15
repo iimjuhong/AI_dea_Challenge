@@ -50,6 +50,11 @@ models/*.onnx
 # PDF files
 *.pdf
 
+# Test scripts
+test_*.py
+visualize_detection.py
+video_viewer.py
+
 # Temporary files
 *.tmp
 *.bak
@@ -65,3 +70,11 @@ htmlcov/
 # Environment variables
 .env
 *.engine
+
+# Ignored Scripts and Docs
+generate_analysis_pdf.py
+get_roi_coords.py
+get_roi_coords_web.py
+slowmo_video.py
+TEST_COMMANDS.md
+TEST_DYNAMODB.md
