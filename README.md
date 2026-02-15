@@ -2,7 +2,7 @@
 
 NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대기시간 추정 시스템
 
-> **최신 업데이트**: YOLOv8s 모델 업그레이드 + YouTube 파이프라인 테스트 추가 (2026-02-16)
+> **최신 업데이트**: YOLOv8s 모델 업그레이드 (2026-02-16)
 
 ---
 
@@ -796,10 +796,6 @@ DynamoDB 전송 통계
 ```
 aidea/
 ├── main.py                          # 메인 진입점
-├── test_youtube_pipeline.py         # YouTube 영상 E2E 파이프라인 테스트
-├── test_local_video.py              # 로컬 비디오 파이프라인 테스트
-├── test_dynamodb_send.py            # DynamoDB 더미 전송 테스트
-├── visualize_detection.py           # 검출 결과 시각화 비디오 생성
 ├── config/
 │   ├── aws_config.json             # AWS DynamoDB 설정 (Phase 6) 🆕
 │   └── roi_config.json             # ROI 설정 저장
@@ -827,7 +823,6 @@ aidea/
 │   ├── download_model.sh          # 모델 다운로드
 │   └── setup_env.sh               # 환경 설정
 ├── requirements.txt               # Python 의존성
-├── TEST_COMMANDS.md               # 테스트 실행 가이드
 ├── TEST_DYNAMODB.md               # DynamoDB 테스트 가이드
 └── docs/
     └── Phase5_대기시간_알고리즘_가이드.md  # 개발 가이드
@@ -844,7 +839,6 @@ aidea/
 - **TensorRT** (FP16 추론)
 - **Flask** (웹 서버)
 - **boto3** (AWS SDK for Python)
-- **yt-dlp** (YouTube 영상 다운로드, 테스트용)
 
 ### 하드웨어 최적화
 - **GStreamer**: nvarguscamerasrc, nvvidconv
@@ -1128,7 +1122,6 @@ MIT License
 - `식당_대기시간_추정_시스템_설계서_v2.pdf`
 - [빠른 실행 가이드](QUICKSTART.md)
 - [폴더 구조 가이드](FOLDER_GUIDE.md)
-- [테스트 실행 가이드](TEST_COMMANDS.md)
 - [DynamoDB 테스트 가이드](TEST_DYNAMODB.md)
 - [3-Thread 아키텍처 가이드](docs/3-Thread_Architecture_Guide.md)
 - [대기시간 알고리즘 가이드](docs/Phase5_대기시간_알고리즘_가이드.md)
