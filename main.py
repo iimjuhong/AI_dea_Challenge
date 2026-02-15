@@ -8,6 +8,7 @@ from src.core.camera import CameraManager
 from src.core.detector import YOLOv8Detector
 from src.core.roi_manager import ROIManager
 from src.core.tracker import ByteTracker
+from src.core.wait_time_estimator import WaitTimeEstimator
 from src.web.app import app, init_app
 
 logging.basicConfig(
@@ -49,6 +50,14 @@ def parse_args():
                         help='추적기: 출력 최소 매칭 횟수')
     parser.add_argument('--min-dwell', type=int, default=30,
                         help='ROI 최소 체류 프레임 수 (기본 30 ≈ 1초@30fps)')
+    parser.add_argument('--aws-config', type=str, default='config/aws_config.json',
+                        help='AWS DynamoDB 설정 파일 경로')
+    parser.add_argument('--no-dynamodb', action='store_true',
+                        help='DynamoDB 전송 비활성화')
+    parser.add_argument('--start-roi', type=str, default=None,
+                        help='대기시간 측정 시작 ROI 이름')
+    parser.add_argument('--end-roi', type=str, default=None,
+                        help='대기시간 측정 종료 ROI 이름 (미지정 시 단일 ROI 모드)')
     return parser.parse_args()
 
 
@@ -90,8 +99,31 @@ def main():
     roi_mgr = ROIManager(config_path=args.roi_config)
     roi_mgr.load()
 
+    # WaitTimeEstimator 초기화 (start_roi가 지정된 경우)
+    wait_estimator = None
+    if args.start_roi:
+        wait_estimator = WaitTimeEstimator(
+            start_roi=args.start_roi,
+            end_roi=args.end_roi,
+            predictor_type='hybrid',
+        )
+        logger.info(f"WaitTimeEstimator 초기화: start={args.start_roi}, end={args.end_roi}")
+
+    # DynamoDB 전송기 초기화
+    dynamodb_sender = None
+    if not args.no_dynamodb and os.path.exists(args.aws_config):
+        try:
+            from src.cloud.dynamodb_sender import DynamoDBSender
+            dynamodb_sender = DynamoDBSender(config_path=args.aws_config)
+            dynamodb_sender.start()
+            logger.info("DynamoDB 전송기 초기화 완료")
+        except Exception as e:
+            logger.warning(f"DynamoDB 전송기 초기화 실패 (전송 없이 계속): {e}")
+
     def shutdown(signum, frame):
         logger.info("종료 시그널 수신, 정리 중...")
+        if dynamodb_sender is not None:
+            dynamodb_sender.stop()
         camera.stop()
         if detector is not None:
             detector.destroy()
@@ -106,7 +138,9 @@ def main():
 
     init_app(camera, detector, roi_mgr, tracker,
              inference_fps=args.inference_fps or args.fps,
-             min_dwell_frames=args.min_dwell)
+             min_dwell_frames=args.min_dwell,
+             wait_estimator=wait_estimator,
+             dynamodb_sender=dynamodb_sender)
 
     logger.info(f"서버 시작: http://{args.host}:{args.port}")
     try:
@@ -121,6 +155,8 @@ def main():
         logger.warning("waitress 미설치 — Flask 개발 서버 사용 (pip install waitress 권장)")
         app.run(host=args.host, port=args.port, threaded=True)
     finally:
+        if dynamodb_sender is not None:
+            dynamodb_sender.stop()
         camera.stop()
         if detector is not None:
             detector.destroy()

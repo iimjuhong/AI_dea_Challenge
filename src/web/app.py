@@ -40,12 +40,16 @@ detector = None
 roi_manager = None
 tracker = None
 _dwell_filter = None
+_wait_estimator = None
+_dynamodb_sender = None
 
 _latest_roi_counts = {}
 _latest_tracked = []  # 최신 추적 결과 (API용)
+_latest_wait_result = {}  # 최신 대기시간 결과
 _inference_thread = None
 
 _TARGET_FPS = 30
+_DYNAMODB_INTERVAL = 10.0  # DynamoDB 전송 주기 (초)
 
 
 # --- FrameBuffer: Inference → Network 사이 논블로킹 버퍼 ---
@@ -96,14 +100,18 @@ _frame_buf = FrameBuffer()
 # --- init ---
 
 def init_app(camera_manager, detector_instance=None, roi_manager_instance=None,
-             tracker_instance=None, inference_fps=None, min_dwell_frames=30):
+             tracker_instance=None, inference_fps=None, min_dwell_frames=30,
+             wait_estimator=None, dynamodb_sender=None):
     """Flask 앱에 카메라/검출기/ROI 매니저/추적기 연결 후 Inference 스레드 시작"""
     global camera, detector, roi_manager, tracker, _dwell_filter
+    global _wait_estimator, _dynamodb_sender
     global _inference_thread, _TARGET_FPS
     camera = camera_manager
     detector = detector_instance
     roi_manager = roi_manager_instance
     tracker = tracker_instance
+    _wait_estimator = wait_estimator
+    _dynamodb_sender = dynamodb_sender
 
     if tracker is not None:
         from src.core.tracker import ROIDwellFilter
@@ -129,7 +137,7 @@ def _inference_loop():
     - 예외 발생 시 스레드가 죽지 않고 복구
     - Queue가 꽉 차는 개념 없음 (최신 1프레임 덮어쓰기)
     """
-    global _latest_roi_counts
+    global _latest_roi_counts, _latest_wait_result
     target_interval = 1.0 / _TARGET_FPS
     error_count = 0
 
@@ -139,6 +147,10 @@ def _inference_loop():
     _perf_jpeg = 0.0
     _perf_total = 0.0
     _PERF_LOG_INTERVAL = 100
+
+    # DynamoDB 전송 상태
+    _last_dynamo_send = 0.0
+    _last_sent_wait_min = -1
 
     while True:
         try:
@@ -191,6 +203,42 @@ def _inference_loop():
                     frame = roi_manager.draw_rois(frame)
                 except Exception as e:
                     logger.warning(f"ROI 오류 (스킵): {e}")
+
+            # --- WaitTimeEstimator 업데이트 ---
+            if _wait_estimator is not None and roi_manager is not None:
+                try:
+                    if tracked:
+                        roi_dets = roi_manager.filter_detections_by_roi(tracked)
+                    else:
+                        roi_dets = {}
+                    wait_result = _wait_estimator.update(roi_dets)
+                    _latest_wait_result = wait_result
+                except Exception as e:
+                    logger.warning(f"WaitTimeEstimator 오류 (스킵): {e}")
+
+            # --- DynamoDB 주기적 전송 ---
+            if _dynamodb_sender is not None and _wait_estimator is not None:
+                try:
+                    now_mono = time.monotonic()
+                    predicted_min = int(_latest_wait_result.get('predicted_wait', 0) / 60)
+                    queue_count = _latest_wait_result.get('current_queue', 0)
+                    time_elapsed = now_mono - _last_dynamo_send
+                    value_changed = predicted_min != _last_sent_wait_min
+
+                    if time_elapsed >= _DYNAMODB_INTERVAL or (value_changed and time_elapsed >= 2.0):
+                        import time as _time_mod
+                        timestamp_ms = int(_time_mod.time() * 1000)
+                        _dynamodb_sender.send({
+                            'restaurant_id': _dynamodb_sender._restaurant_id,
+                            'corner_id': _dynamodb_sender._corner_id,
+                            'queue_count': queue_count,
+                            'est_wait_time_min': predicted_min,
+                            'timestamp': timestamp_ms,
+                        })
+                        _last_dynamo_send = now_mono
+                        _last_sent_wait_min = predicted_min
+                except Exception as e:
+                    logger.warning(f"DynamoDB 전송 준비 오류 (스킵): {e}")
 
             # --- JPEG 인코딩 → FrameBuffer (논블로킹) ---
             t_jpeg = time.monotonic()
@@ -354,11 +402,40 @@ def api_stats():
 
 @app.route('/api/tracks')
 def api_tracks():
-    """현재 활성 추적 결과 반환 (Phase 5 준비)"""
+    """현재 활성 추적 결과 반환"""
     return jsonify({
         'tracks': list(_latest_tracked),
         'tracker_active': tracker is not None,
     })
+
+
+@app.route('/api/wait_time')
+def api_wait_time():
+    """현재 대기시간 예측 및 대기열 정보"""
+    if _wait_estimator is None:
+        return jsonify({'error': 'WaitTimeEstimator not initialized'}), 503
+
+    result = dict(_latest_wait_result)
+    # active_waiters는 JSON 직렬화 위해 정리
+    result.pop('events', None)
+    result.pop('completed', None)
+    active = result.pop('active_waiters', {})
+    result['active_waiters'] = {str(k): round(v, 1) for k, v in active.items()}
+    result['predicted_wait'] = round(result.get('predicted_wait', 0), 1)
+
+    stats = _wait_estimator.get_statistics()
+    if stats:
+        result['statistics'] = stats
+
+    return jsonify(result)
+
+
+@app.route('/api/dynamodb/stats')
+def api_dynamodb_stats():
+    """DynamoDB 전송 통계"""
+    if _dynamodb_sender is None:
+        return jsonify({'error': 'DynamoDB sender not initialized'}), 503
+    return jsonify(_dynamodb_sender.stats)
 
 
 # --- ROI API ---
