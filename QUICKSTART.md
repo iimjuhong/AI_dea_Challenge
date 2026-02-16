@@ -96,7 +96,42 @@ bash scripts/download_model.sh
 
 ---
 
-### 2️⃣ 기본 실행 (카메라 + YOLO만)
+### 2️⃣ 비디오 파일로 테스트 (카메라 없이)
+
+카메라가 없을 때 폰으로 촬영한 영상으로 전체 파이프라인을 테스트합니다.
+
+```bash
+# 1. 가상환경 활성화
+source venv/bin/activate  # 또는 conda activate aidea
+
+# 2. test/ 폴더에 영상 파일 넣기
+cp ~/Downloads/sample.mp4 test/
+
+# 3. 비디오 모드 실행
+python3 test/run_video.py --video test/sample.mp4 --model models/yolov8s.onnx
+
+# 웹 UI 접속
+# http://localhost:5000
+```
+
+**DynamoDB 없이 검출만 테스트**:
+```bash
+python3 test/run_video.py --video test/sample.mp4 --model models/yolov8s.onnx --no-dynamodb
+```
+
+**ROI + 대기시간까지 풀 테스트**:
+```bash
+python3 test/run_video.py \
+  --video test/sample.mp4 \
+  --model models/yolov8s.onnx \
+  --start-roi "대기구역" --end-roi "카운터"
+```
+
+> 상세 옵션: [test/README.md](test/README.md)
+
+---
+
+### 3️⃣ 기본 실행 (카메라 + YOLO만)
 
 ```bash
 # 1. 프로젝트 폴더에서
@@ -116,7 +151,7 @@ python3 main.py
 
 ---
 
-### 3️⃣ 대기시간 측정 실행 (AWS 없이)
+### 4️⃣ 대기시간 측정 실행 (AWS 없이)
 
 ```bash
 # 가상환경 활성화 (가상환경 사용 시)
@@ -133,7 +168,7 @@ python3 main.py --start-roi "대기구역" --end-roi "카운터"
 
 ---
 
-### 4️⃣ AWS DynamoDB 전송까지 (풀 스택)
+### 5️⃣ AWS DynamoDB 전송까지 (풀 스택)
 
 #### Step 1: AWS 자격증명 설정 (최초 1회)
 
@@ -298,23 +333,27 @@ config/
 
 - **전체 문서**: [README.md](README.md)
 - **폴더 구조 가이드**: [FOLDER_GUIDE.md](FOLDER_GUIDE.md)
+- **비디오 파일 테스트**: [test/README.md](test/README.md)
 - **대기시간 알고리즘**: [docs/Phase5_대기시간_알고리즘_가이드.md](docs/Phase5_대기시간_알고리즘_가이드.md)
 - **3-Thread 아키텍처**: [docs/3-Thread_Architecture_Guide.md](docs/3-Thread_Architecture_Guide.md)
 
 ---
 
-## 🎬 가장 많이 쓰는 명령어 TOP 3
+## 🎬 가장 많이 쓰는 명령어 TOP 4
 
 ```bash
 # 0위: 가상환경 활성화 (매번 필수!)
 source venv/bin/activate  # 또는 conda activate aidea
 
-# 1위: 기본 실행
+# 1위: 기본 실행 (카메라)
 python3 main.py
 
-# 2위: 대기시간 측정 + AWS 전송
+# 2위: 비디오 파일로 테스트 (카메라 없이)
+python3 test/run_video.py --video test/sample.mp4 --model models/yolov8s.onnx
+
+# 3위: 대기시간 측정 + AWS 전송
 python3 main.py --start-roi "대기구역" --end-roi "카운터"
 
-# 3위: 통계 확인
+# 4위: 통계 확인
 curl http://localhost:5000/api/stats
 ```

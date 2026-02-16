@@ -202,6 +202,34 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 
 ---
 
+### ✅ 비디오 파일 테스트 모드 (완료)
+
+<details>
+<summary>세부 구현 내용 보기</summary>
+
+- **카메라 없이 검출 파이프라인 테스트**
+  - 폰으로 촬영한 영상 파일(mp4, avi, mov 등)로 전체 파이프라인 동작 확인
+  - `VideoFileManager`: `CameraManager`와 동일 인터페이스 제공 (drop-in 교체)
+  - 기존 `app.py` 수정 없이 검출/추적/ROI/DynamoDB 전부 동작
+
+- **VideoFileManager 주요 기능**
+  - 백그라운드 스레드에서 원본 FPS에 맞춰 프레임 읽기
+  - 영상 끝나면 자동 루프 (무한 반복 재생)
+  - `display_width/height`로 리사이즈
+  - `--no-loop` 옵션으로 반복 재생 비활성화
+
+- **사용법**
+  ```bash
+  python test/run_video.py --video test/sample.mp4 --model models/yolov8s.onnx
+  # 브라우저: http://<IP>:5000
+  ```
+
+- **상세 문서**: [test/README.md](test/README.md)
+
+</details>
+
+---
+
 ### 🚧 Phase 7: 웹 대시보드 (예정)
 
 - 실시간 통계 차트 (Chart.js)
@@ -215,20 +243,28 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 ### 전체 파이프라인 (End-to-End)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    CSI 카메라 (IMX219)                       │
-│                   1280x720 @ 30fps                          │
-└──────────────────────┬──────────────────────────────────────┘
+  [운영 모드: main.py]              [테스트 모드: test/run_video.py]
+
+┌──────────────────────────┐     ┌──────────────────────────┐
+│   CSI 카메라 (IMX219)     │     │   비디오 파일 (mp4 등)    │
+│   1280x720 @ 30fps       │     │   원본 해상도 @ 원본 FPS  │
+└───────────┬──────────────┘     └───────────┬──────────────┘
+            ↓                                ↓
+┌──────────────────────────┐     ┌──────────────────────────┐
+│  GStreamer 파이프라인      │     │  cv2.VideoCapture        │
+│  nvarguscamerasrc→BGR    │     │  → 리사이즈 → FPS pacing │
+└───────────┬──────────────┘     └───────────┬──────────────┘
+            ↓                                ↓
+┌──────────────────────────┐     ┌──────────────────────────┐
+│  CameraManager           │     │  VideoFileManager        │
+│  (백그라운드 스레드)       │     │  (백그라운드 스레드)       │
+│  - thread-safe 캡처      │     │  - thread-safe 읽기      │
+│  - HW JPEG 인코딩        │     │  - 자동 루프 재생         │
+└───────────┬──────────────┘     └───────────┬──────────────┘
+            └──────────┬─────────────────────┘
                        ↓
-┌─────────────────────────────────────────────────────────────┐
-│              GStreamer 파이프라인                            │
-│  nvarguscamerasrc → nvvidconv → 640x480 → BGR               │
-└──────────────────────┬──────────────────────────────────────┘
-                       ↓
-┌─────────────────────────────────────────────────────────────┐
-│           CameraManager (백그라운드 스레드)                   │
-│  - 프레임 지속 캡처 (thread-safe)                             │
-│  - HW JPEG 인코딩 지원 (nvjpegenc)                           │
+              동일 인터페이스: start() / stop()
+              get_frame() / is_running
 └──────────────────────┬──────────────────────────────────────┘
                        ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -281,10 +317,12 @@ NVIDIA Jetson Orin Super Nano 기반 실시간 식당 대기열 추적 및 대�
 ### 3-Thread 아키텍처 (성능 최적화)
 
 ```
-Thread 1 (Camera):
-  └→ CameraManager._capture_loop
-     └→ GStreamer에서 프레임 캡처
-        └→ _frame에 저장 (thread-safe)
+Thread 1 (프레임 소스):
+  ├→ [운영] CameraManager._capture_loop
+  │    └→ GStreamer에서 프레임 캡처
+  └→ [테스트] VideoFileManager._read_loop
+       └→ 비디오 파일에서 FPS 맞춰 읽기 (자동 루프)
+  └→ _frame에 저장 (thread-safe)
 
 Thread 2 (Inference):
   └→ _inference_loop
@@ -317,6 +355,14 @@ Thread 4 (DynamoDB Worker):
 - 백그라운드 스레드에서 프레임 캡처
 - thread-safe 프레임 접근
 - HW JPEG 인코딩 지원
+```
+
+#### 1-1. **VideoFileManager** (`src/core/video_source.py`)
+```python
+- CameraManager와 동일 인터페이스 (drop-in 교체)
+- cv2.VideoCapture로 비디오 파일 읽기
+- 원본 FPS에 맞춘 프레임 pacing
+- 영상 끝 자동 루프 재생
 ```
 
 #### 2. **YOLOv8Detector** (`src/core/detector.py`)
@@ -388,6 +434,24 @@ python3 main.py
 # 5. 웹 UI 접속
 # http://localhost:5000
 ```
+
+### 비디오 파일로 테스트 (카메라 없이)
+
+```bash
+# 1. test/ 폴더에 영상 파일 넣기
+cp ~/Downloads/sample.mp4 test/
+
+# 2. 비디오 모드로 실행
+python3 test/run_video.py --video test/sample.mp4 --model models/yolov8s.onnx
+
+# 3. 웹 UI 접속
+# http://localhost:5000
+
+# 4. DynamoDB 없이 검출만 테스트
+python3 test/run_video.py --video test/sample.mp4 --model models/yolov8s.onnx --no-dynamodb
+```
+
+> 상세 옵션은 [test/README.md](test/README.md) 참조
 
 ### DynamoDB 연동 실행
 
@@ -795,11 +859,15 @@ DynamoDB 전송 통계
 
 ```
 aidea/
-├── main.py                          # 메인 진입점
+├── main.py                          # 메인 진입점 (카메라 모드)
 ├── config/
-│   ├── aws_config.json             # AWS DynamoDB 설정 (Phase 6) 🆕
+│   ├── aws_config.json             # AWS DynamoDB 설정
 │   └── roi_config.json             # ROI 설정 저장
-├── frontend/                        # 프론트엔드 타입 정의 (Phase 7) 🆕
+├── test/                            # 비디오 파일 테스트 🆕
+│   ├── run_video.py                # 비디오 테스트 실행 스크립트
+│   ├── README.md                   # 테스트 모드 사용법
+│   └── (*.mp4)                     # 테스트 영상 파일 (git 미추적)
+├── frontend/                        # 프론트엔드 타입 정의 (Phase 7)
 │   └── src/
 │       └── types/
 │           └── hyeat.ts            # TypeScript 인터페이스
@@ -807,10 +875,11 @@ aidea/
 │   ├── yolov8s.onnx                # YOLO 모델
 │   └── yolov8s_fp16.engine         # TensorRT 엔진 캐시
 ├── src/
-│   ├── cloud/                       # 클라우드 연동 (Phase 6) 🆕
+│   ├── cloud/                       # 클라우드 연동
 │   │   └── dynamodb_sender.py      # DynamoDB 전송 모듈
 │   ├── core/                       # 핵심 로직
-│   │   ├── camera.py              # 카메라 관리자
+│   │   ├── camera.py              # 카메라 관리자 (운영용)
+│   │   ├── video_source.py        # 비디오 파일 관리자 (테스트용) 🆕
 │   │   ├── detector.py            # YOLO 검출기
 │   │   ├── roi_manager.py         # ROI 관리자
 │   │   ├── tracker.py             # ByteTrack 추적기
@@ -1122,6 +1191,7 @@ MIT License
 - `식당_대기시간_추정_시스템_설계서_v2.pdf`
 - [빠른 실행 가이드](QUICKSTART.md)
 - [폴더 구조 가이드](FOLDER_GUIDE.md)
+- [비디오 파일 테스트 가이드](test/README.md)
 - [DynamoDB 테스트 가이드](TEST_DYNAMODB.md)
 - [3-Thread 아키텍처 가이드](docs/3-Thread_Architecture_Guide.md)
 - [대기시간 알고리즘 가이드](docs/Phase5_대기시간_알고리즘_가이드.md)
